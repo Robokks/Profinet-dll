@@ -8,8 +8,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 #include <iphlpapi.h>
 #include <pcap.h>
 
@@ -53,6 +53,8 @@ int frameio_load_npcap(void)
     if (!g_npcap.hDll)
         return -1;
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
 #define LOAD(name) \
     g_npcap.name = (pfn_pcap_##name)GetProcAddress(g_npcap.hDll, "pcap_" #name)
 
@@ -67,6 +69,7 @@ int frameio_load_npcap(void)
     LOAD(freealldevs);
     LOAD(geterr);
 #undef LOAD
+#pragma GCC diagnostic pop
 
     if (!g_npcap.open_live || !g_npcap.sendpacket || !g_npcap.next_ex ||
         !g_npcap.findalldevs) {

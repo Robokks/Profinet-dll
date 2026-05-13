@@ -34,6 +34,7 @@ if(WIN32)
         -static-libgcc
         -static-libstdc++
         -Wl,--enable-stdcall-fixup
+        -Wl,--add-stdcall-alias
         -Wl,-subsystem,windows
     )
     set(LIB_SUFFIX ".dll")
