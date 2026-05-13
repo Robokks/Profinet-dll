@@ -12,10 +12,6 @@
 #include <string.h>
 #include <stdio.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 /* ════════════════════════════════════════════════════════════════════════════
  * Lifecycle
  * ════════════════════════════════════════════════════════════════════════════ */
@@ -28,33 +24,30 @@ int32_t PNAPI PN_Initialize(const char *adapter_name, PN_HANDLE *out_handle)
     PN_Context *ctx = (PN_Context *)calloc(1, sizeof(PN_Context));
     if (!ctx) return PN_ERR_INTERNAL;
 
-#ifdef _WIN32
-    InitializeCriticalSection(&ctx->io_lock);
-    InitializeCriticalSection(&ctx->stats_lock);
-    ctx->stop_event  = CreateEventW(NULL, TRUE, FALSE, NULL);
-    ctx->rpc_sock    = INVALID_SOCKET;
-    ctx->cyclic_thread = NULL;
-#else
-    ctx->rpc_sock = -1;
-#endif
+    PN_LOCK_INIT(ctx->io_lock);
+    PN_LOCK_INIT(ctx->stats_lock);
+    PN_EVENT_INIT(ctx->stop_event);
+    ctx->rpc_sock      = PN_SOCK_INVALID;
+    ctx->cyclic_thread = PN_THREAD_NULL;
 
     ctx->state = PN_STATE_IDLE;
     ctx->output_frame_id = 0xC000;
     ctx->input_frame_id  = 0xC001;
-    ctx->send_clock_factor = 128; /* 1ms default */
+    ctx->send_clock_factor = 128;
     ctx->output_iops = RT_IOPS_GOOD;
     ctx->input_iocs  = RT_IOCS_GOOD;
 
-    /* Default Telegram 1 sizes */
     ctx->output_len = PROFIDRIVE_T1_DATA_LEN;
     ctx->input_len  = PROFIDRIVE_T1_DATA_LEN;
     profidrive_encode_t1(ctx->output_buf, PROFIDRIVE_STW1_STOP, 0);
 
-    /* Open Npcap adapter */
     char errbuf[256] = {0};
     ctx->pcap = frameio_open(adapter_name, ctx->local_mac, errbuf);
     if (!ctx->pcap) {
         pn_set_error(ctx, "PN_Initialize: %s", errbuf);
+        PN_LOCK_DESTROY(ctx->io_lock);
+        PN_LOCK_DESTROY(ctx->stats_lock);
+        PN_EVENT_DESTROY(ctx->stop_event);
         free(ctx);
         return PN_ERR_PCAP_OPEN;
     }
@@ -83,11 +76,9 @@ int32_t PNAPI PN_Shutdown(PN_HANDLE handle)
 
     rpc_cm_cleanup(ctx);
 
-#ifdef _WIN32
-    if (ctx->stop_event) CloseHandle(ctx->stop_event);
-    DeleteCriticalSection(&ctx->io_lock);
-    DeleteCriticalSection(&ctx->stats_lock);
-#endif
+    PN_EVENT_DESTROY(ctx->stop_event);
+    PN_LOCK_DESTROY(ctx->io_lock);
+    PN_LOCK_DESTROY(ctx->stats_lock);
 
     free(ctx);
     return PN_OK;
@@ -139,7 +130,6 @@ int32_t PNAPI PN_LoadGSDML(PN_HANDLE handle, const char *gsdml_path)
            (size_t)dev.module_count * sizeof(PN_ModuleDesc));
     ctx->dap_ident = dev.dap_ident;
 
-    /* Apply timing from GSDML if sensible */
     if (dev.send_clock > 0 && dev.send_clock <= 4096)
         ctx->send_clock_factor = dev.send_clock;
     if (dev.reduction_ratio > 0)
@@ -248,7 +238,6 @@ int32_t PNAPI PN_Connect(PN_HANDLE handle, const PN_ARConfig *ar_config)
     if (pn_str_to_ip(ar_config->device_ip, &ctx->device_ip) != 0)
         return PN_ERR_INVALID_PARAM;
 
-    /* Apply send clock from ar_config if provided */
     if (ar_config->send_clock_factor > 0)
         ctx->send_clock_factor = ar_config->send_clock_factor;
 
@@ -269,7 +258,6 @@ int32_t PNAPI PN_Connect(PN_HANDLE handle, const PN_ARConfig *ar_config)
         return rc;
     }
 
-    /* Start cyclic RT exchange */
     ctx->state = PN_STATE_CYCLIC_ACTIVE;
     rc = rt_cyclic_start(ctx);
     if (rc != PN_OK) {
@@ -279,12 +267,10 @@ int32_t PNAPI PN_Connect(PN_HANDLE handle, const PN_ARConfig *ar_config)
         return rc;
     }
 
-#ifdef _WIN32
-    EnterCriticalSection(&ctx->stats_lock);
+    PN_LOCK(ctx->stats_lock);
     ctx->stats.connected      = 1;
     ctx->stats.cyclic_running = 1;
-    LeaveCriticalSection(&ctx->stats_lock);
-#endif
+    PN_UNLOCK(ctx->stats_lock);
 
     pn_log("PN_Connect: cyclic IO active");
     return PN_OK;
@@ -305,12 +291,10 @@ int32_t PNAPI PN_Disconnect(PN_HANDLE handle)
     rpc_cm_release(ctx);
     rpc_cm_cleanup(ctx);
 
-#ifdef _WIN32
-    EnterCriticalSection(&ctx->stats_lock);
+    PN_LOCK(ctx->stats_lock);
     ctx->stats.connected      = 0;
     ctx->stats.cyclic_running = 0;
-    LeaveCriticalSection(&ctx->stats_lock);
-#endif
+    PN_UNLOCK(ctx->stats_lock);
 
     ctx->state = PN_STATE_IDLE;
     pn_log("PN_Disconnect: done");
@@ -334,14 +318,10 @@ int32_t PNAPI PN_WriteOutputs(PN_HANDLE handle, const uint8_t *data,
     if (!handle || !data) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
     if (length > PN_MAX_IO_LEN) return PN_ERR_BUFFER_TOO_SMALL;
-#ifdef _WIN32
-    EnterCriticalSection(&ctx->io_lock);
-#endif
+    PN_LOCK(ctx->io_lock);
     memcpy(ctx->output_buf, data, length);
     ctx->output_len = length;
-#ifdef _WIN32
-    LeaveCriticalSection(&ctx->io_lock);
-#endif
+    PN_UNLOCK(ctx->io_lock);
     return PN_OK;
 }
 
@@ -350,13 +330,9 @@ int32_t PNAPI PN_ReadInputs(PN_HANDLE handle, uint8_t *data, uint16_t length)
     if (!handle || !data) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
     if (length > PN_MAX_IO_LEN) return PN_ERR_BUFFER_TOO_SMALL;
-#ifdef _WIN32
-    EnterCriticalSection(&ctx->io_lock);
-#endif
+    PN_LOCK(ctx->io_lock);
     memcpy(data, ctx->input_buf, length < ctx->input_len ? length : ctx->input_len);
-#ifdef _WIN32
-    LeaveCriticalSection(&ctx->io_lock);
-#endif
+    PN_UNLOCK(ctx->io_lock);
     return PN_OK;
 }
 
@@ -370,14 +346,10 @@ int32_t PNAPI PN_DriveSetpoint(PN_HANDLE handle, uint16_t STW1, uint16_t NSOLL_A
     PN_Context *ctx = pn_ctx(handle);
     uint8_t buf[PROFIDRIVE_T1_DATA_LEN];
     profidrive_encode_t1(buf, STW1, NSOLL_A);
-#ifdef _WIN32
-    EnterCriticalSection(&ctx->io_lock);
-#endif
+    PN_LOCK(ctx->io_lock);
     memcpy(ctx->output_buf, buf, PROFIDRIVE_T1_DATA_LEN);
     ctx->output_len = PROFIDRIVE_T1_DATA_LEN;
-#ifdef _WIN32
-    LeaveCriticalSection(&ctx->io_lock);
-#endif
+    PN_UNLOCK(ctx->io_lock);
     return PN_OK;
 }
 
@@ -386,13 +358,9 @@ int32_t PNAPI PN_DriveStatus(PN_HANDLE handle, uint16_t *ZSW1, uint16_t *NIST_A)
     if (!handle) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
     uint8_t buf[PROFIDRIVE_T1_DATA_LEN] = {0};
-#ifdef _WIN32
-    EnterCriticalSection(&ctx->io_lock);
-#endif
+    PN_LOCK(ctx->io_lock);
     memcpy(buf, ctx->input_buf, PROFIDRIVE_T1_DATA_LEN);
-#ifdef _WIN32
-    LeaveCriticalSection(&ctx->io_lock);
-#endif
+    PN_UNLOCK(ctx->io_lock);
     profidrive_decode_t1(buf, ZSW1, NIST_A);
     return PN_OK;
 }
@@ -405,13 +373,9 @@ int32_t PNAPI PN_GetStats(PN_HANDLE handle, PN_Stats *out_stats)
 {
     if (!handle || !out_stats) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
-#ifdef _WIN32
-    EnterCriticalSection(&ctx->stats_lock);
-#endif
+    PN_LOCK(ctx->stats_lock);
     *out_stats = ctx->stats;
-#ifdef _WIN32
-    LeaveCriticalSection(&ctx->stats_lock);
-#endif
+    PN_UNLOCK(ctx->stats_lock);
     return PN_OK;
 }
 
@@ -419,15 +383,11 @@ int32_t PNAPI PN_ResetStats(PN_HANDLE handle)
 {
     if (!handle) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
-#ifdef _WIN32
-    EnterCriticalSection(&ctx->stats_lock);
-#endif
+    PN_LOCK(ctx->stats_lock);
     memset(&ctx->stats, 0, sizeof(ctx->stats));
     ctx->stats.connected      = (uint8_t)(ctx->state == PN_STATE_CYCLIC_ACTIVE);
-    ctx->stats.cyclic_running = (uint8_t)ctx->cyclic_running;
-#ifdef _WIN32
-    LeaveCriticalSection(&ctx->stats_lock);
-#endif
+    ctx->stats.cyclic_running = (uint8_t)PN_ATOMIC_GET(ctx->cyclic_running);
+    PN_UNLOCK(ctx->stats_lock);
     return PN_OK;
 }
 

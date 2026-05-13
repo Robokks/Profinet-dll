@@ -5,9 +5,9 @@
 #include "../include/profinet_api.h"
 
 #ifdef _WIN32
-/* winsock2.h must be included before windows.h */
-#include <winsock2.h>
-#include <windows.h>
+#  include "platform_win.h"
+#else
+#  include "platform_linux.h"
 #endif
 
 /* Forward declaration for pcap types (resolved via frame_io at runtime) */
@@ -34,8 +34,8 @@ typedef enum {
 
 /* ─── Main controller context ────────────────────────────────────────────── */
 typedef struct PN_Context {
-    /* Raw Ethernet (Npcap) */
-    void       *pcap;          /* pcap_t* — opaque to avoid header dep */
+    /* Raw Ethernet handle (pcap_t* on Windows, AF_PACKET fd wrapped on Linux) */
+    void       *pcap;
     uint8_t     local_mac[6];
     uint32_t    local_ip;      /* big-endian */
     char        adapter_name[256];
@@ -53,20 +53,14 @@ typedef struct PN_Context {
     /* RPC state */
     uint8_t     activity_uuid[16];
     uint32_t    rpc_call_id;
-#ifdef _WIN32
-    SOCKET      rpc_sock;
-#else
-    int         rpc_sock;
-#endif
+    PN_SOCK     rpc_sock;
 
     /* Cyclic IO — RT frame IDs negotiated during connect */
     uint16_t    output_frame_id;  /* controller → device */
     uint16_t    input_frame_id;   /* device → controller */
 
     /* Double-buffered IO data */
-#ifdef _WIN32
-    CRITICAL_SECTION io_lock;
-#endif
+    PN_MUTEX    io_lock;
     uint8_t     output_buf[PN_MAX_IO_LEN];
     uint16_t    output_len;
     uint8_t     input_buf[PN_MAX_IO_LEN];
@@ -75,11 +69,9 @@ typedef struct PN_Context {
     uint8_t     input_iocs;
 
     /* Cyclic thread */
-#ifdef _WIN32
-    HANDLE      cyclic_thread;
-    HANDLE      stop_event;
-    volatile LONG cyclic_running;
-#endif
+    PN_THREAD   cyclic_thread;
+    PN_EVENT    stop_event;     /* Windows: manual-reset event; Linux: unused */
+    PN_ATOMIC   cyclic_running;
     uint32_t    send_clock_factor;   /* 128 = 1ms */
     uint16_t    cycle_counter;
 
@@ -96,9 +88,7 @@ typedef struct PN_Context {
     int32_t       discovered_count;
 
     /* Stats */
-#ifdef _WIN32
-    CRITICAL_SECTION stats_lock;
-#endif
+    PN_MUTEX      stats_lock;
     PN_Stats      stats;
 
     /* State */
