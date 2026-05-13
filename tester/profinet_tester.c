@@ -21,10 +21,12 @@ typedef void *PN_HANDLE;
 
 typedef struct {
     uint8_t  mac[6];
+    uint8_t  _pad[2];          /* must match profinet_api.h exactly */
     char     ip_str[16];
     char     name_of_station[240];
     uint16_t vendor_id;
     uint16_t device_id;
+    char     order_id[64];
 } PN_DeviceInfo;
 
 typedef struct {
@@ -38,10 +40,13 @@ typedef struct {
 
 typedef struct {
     uint8_t  device_mac[6];
+    uint8_t  _pad[2];          /* must match profinet_api.h exactly */
     char     device_ip[16];
     uint16_t send_clock_factor;
     uint8_t  reduction_ratio;
+    uint8_t  _pad2;
     uint16_t watchdog_factor;
+    uint8_t  _pad3[2];
     uint32_t api;
     uint16_t slot;
     uint16_t subslot;
@@ -53,9 +58,11 @@ typedef struct {
     uint64_t frames_sent;
     uint64_t frames_received;
     uint64_t missed_cycles;
+    uint64_t watchdog_timeouts; /* must match profinet_api.h exactly */
     uint32_t cycle_counter;
     uint8_t  connected;
     uint8_t  cyclic_running;
+    uint8_t  _pad[2];
 } PN_Stats;
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -279,7 +286,11 @@ static BOOL load_dll(void)
 
     g_dll.hDll = LoadLibraryA(path);
     if (!g_dll.hDll) g_dll.hDll = LoadLibraryA("profinet.dll");
-    if (!g_dll.hDll) return FALSE;
+    if (!g_dll.hDll) {
+        /* Store the error so on_load_dll can show it */
+        SetLastError(GetLastError());
+        return FALSE;
+    }
 
 #define LOAD(fn) g_dll.fn = (pfn_PN_##fn)GetProcAddress(g_dll.hDll,"PN_"#fn)
     LOAD(Initialize); LOAD(Shutdown); LOAD(GetVersion);
@@ -563,13 +574,15 @@ static void do_io_refresh(void)
     if (g_dll.GetStats) {
         PN_Stats s={0};
         g_dll.GetStats(g_handle,&s);
-        char buf[300];
+        char buf[400];
         _snprintf(buf,sizeof(buf),
-            "Frames sent: %I64u    Frames received: %I64u    Missed cycles: %I64u\r\n"
+            "Frames sent: %I64u    Frames received: %I64u\r\n"
+            "Missed cycles: %I64u    Watchdog timeouts: %I64u\r\n"
             "Cycle counter: %u    Connected: %s    Cyclic running: %s",
             (unsigned long long)s.frames_sent,
             (unsigned long long)s.frames_received,
             (unsigned long long)s.missed_cycles,
+            (unsigned long long)s.watchdog_timeouts,
             s.cycle_counter,
             s.connected      ? "YES" : "NO",
             s.cyclic_running ? "YES" : "NO");
@@ -589,16 +602,34 @@ static void on_load_dll(void)
         SetWindowTextA(gs_ver,ver[0]?ver:"-");
         log_msg("[DLL] profinet.dll loaded. Version: %s",ver[0]?ver:"?");
     } else {
+        DWORD err = GetLastError();
         char path[MAX_PATH];
         GetModuleFileNameA(NULL,path,MAX_PATH);
         char *sep=strrchr(path,'\\'); if(sep) *(sep+1)='\0';
-        char msg[400]; _snprintf(msg,sizeof(msg),"FAILED — not found in: %s",path);
+        char msg[400];
+        _snprintf(msg,sizeof(msg),"FAILED (error %lu) — looked in: %s",(unsigned long)err,path);
         SetWindowTextA(gs_status,msg);
-        log_msg("[DLL] Load failed. Put profinet.dll next to %s",path);
-        MessageBoxA(g_hwnd,
-            "profinet.dll not found.\r\n\r\n"
-            "Copy profinet.dll to the same folder as this EXE and try again.",
-            "DLL not found",MB_ICONWARNING|MB_OK);
+        log_msg("[DLL] Load failed. Error=%lu. Put profinet.dll next to EXE.",(unsigned long)err);
+
+        char detail[512];
+        /* FormatMessage gives human-readable description of the Windows error */
+        char winmsg[256]="";
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL,err,0,winmsg,sizeof(winmsg),NULL);
+        /* strip trailing newline */
+        int wl=(int)strlen(winmsg);
+        while(wl>0 && (winmsg[wl-1]=='\r'||winmsg[wl-1]=='\n')) winmsg[--wl]='\0';
+
+        _snprintf(detail,sizeof(detail),
+            "profinet.dll could not be loaded.\r\n\r\n"
+            "Windows error %lu: %s\r\n\r\n"
+            "Folder searched: %s\r\n\r\n"
+            "Checklist:\r\n"
+            "  1. profinet.dll must be in the same folder as this EXE\r\n"
+            "  2. Both files must be 32-bit (this EXE and the DLL)\r\n"
+            "  3. Npcap must be installed (npcap.com) for network features",
+            (unsigned long)err,winmsg,path);
+        MessageBoxA(g_hwnd,detail,"DLL load failed",MB_ICONERROR|MB_OK);
     }
 }
 
@@ -610,8 +641,18 @@ static void on_enumerate(void)
     g_dll.EnumerateAdapters(names,64,&cnt);
     SendMessageA(gs_combo,CB_RESETCONTENT,0,0);
     for(int i=0;i<cnt;i++) SendMessageA(gs_combo,CB_ADDSTRING,0,(LPARAM)names[i]);
-    if(cnt>0) SendMessageA(gs_combo,CB_SETCURSEL,0,0);
-    log_msg("[ENUM] Found %d adapter(s).",cnt);
+    if(cnt>0){
+        SendMessageA(gs_combo,CB_SETCURSEL,0,0);
+        log_msg("[ENUM] Found %d adapter(s). Select one then click Initialize.",cnt);
+    } else {
+        log_msg("[ENUM] No adapters found. Install Npcap from https://npcap.com/ then retry.");
+        MessageBoxA(g_hwnd,
+            "No network adapters found.\r\n\r\n"
+            "Npcap must be installed for network capture.\r\n"
+            "Download and install from: https://npcap.com/\r\n\r\n"
+            "After installing Npcap, click Enumerate again.",
+            "Npcap required",MB_ICONINFORMATION|MB_OK);
+    }
 }
 
 static void on_initialize(void)
@@ -811,8 +852,7 @@ static void on_connect(void)
     /* device_mac from discover selection, or zero if unknown */
     if(g_sel_device>=0 && g_sel_device<g_device_count)
         memcpy(cfg.device_mac,g_devices[g_sel_device].mac,6);
-    strncpy(cfg.device_ip,ip,sizeof(cfg.device_ip)-1);
-    cfg.device_ip[sizeof(cfg.device_ip)-1]='\0';
+    _snprintf(cfg.device_ip, sizeof(cfg.device_ip), "%s", ip);
     cfg.send_clock_factor = (uint16_t)atoi(clock);
     if(!cfg.send_clock_factor) cfg.send_clock_factor=128;
     cfg.watchdog_factor = (uint16_t)atoi(wdog);

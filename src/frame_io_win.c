@@ -210,17 +210,43 @@ int frameio_recv(FrameIO *fio, uint8_t *buf, int buf_size, int timeout_ms)
 /* ─── frameio_enum_adapters ──────────────────────────────────────────────── */
 int frameio_enum_adapters(char names[][256], int max_count, int *out_count)
 {
-    if (frameio_load_npcap() != 0) return -1;
-    char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_if_t *alldevs = NULL;
-    if (g_npcap.findalldevs(&alldevs, errbuf) != 0) return -1;
+    /* Try Npcap first — gives exact \Device\NPF_{GUID} names */
+    if (frameio_load_npcap() == 0) {
+        char errbuf[PCAP_ERRBUF_SIZE];
+        pcap_if_t *alldevs = NULL;
+        if (g_npcap.findalldevs(&alldevs, errbuf) == 0 && alldevs) {
+            int n = 0;
+            for (pcap_if_t *d = alldevs; d && n < max_count; d = d->next, n++)
+                pn_strlcpy(names[n], d->name, 256);
+            if (out_count) *out_count = n;
+            g_npcap.freealldevs(alldevs);
+            return 0;
+        }
+    }
+
+    /* Npcap not installed — fall back to iphlpapi and format as NPF names.
+     * These names are valid once Npcap is installed; shown so user can
+     * see adapters and then install Npcap. */
+    PIP_ADAPTER_INFO pInfo = NULL;
+    ULONG bufLen = 0;
+    GetAdaptersInfo(NULL, &bufLen);
+    pInfo = (PIP_ADAPTER_INFO)malloc(bufLen);
+    if (!pInfo) { if (out_count) *out_count = 0; return 0; }
+
+    if (GetAdaptersInfo(pInfo, &bufLen) != ERROR_SUCCESS) {
+        free(pInfo);
+        if (out_count) *out_count = 0;
+        return 0;
+    }
 
     int n = 0;
-    for (pcap_if_t *d = alldevs; d && n < max_count; d = d->next, n++)
-        pn_strlcpy(names[n], d->name, 256);
-
+    for (PIP_ADAPTER_INFO p = pInfo; p && n < max_count; p = p->Next) {
+        snprintf(names[n], 256, "\\Device\\NPF_{%s}", p->AdapterName);
+        n++;
+    }
+    free(pInfo);
     if (out_count) *out_count = n;
-    g_npcap.freealldevs(alldevs);
+    pn_log("Npcap not found; listed %d adapter(s) via iphlpapi (install Npcap to capture)", n);
     return 0;
 }
 

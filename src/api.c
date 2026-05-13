@@ -398,3 +398,16 @@ int32_t PNAPI PN_GetLastError(PN_HANDLE handle, char *buf, uint32_t buf_size)
     pn_strlcpy(buf, ctx->last_error, (size_t)buf_size);
     return PN_OK;
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * Version
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+void PNAPI PN_GetVersion(char *buf, uint32_t buf_size)
+{
+    if (!buf || buf_size == 0) return;
+    snprintf(buf, (size_t)buf_size, "%d.%d.%d",
+             PROFINET_VERSION_MAJOR,
+             PROFINET_VERSION_MINOR,
+             PROFINET_VERSION_PATCH);
+}
