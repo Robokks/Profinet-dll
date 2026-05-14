@@ -90,36 +90,50 @@ void frameio_unload_npcap(void)
 }
 
 /* ─── Get MAC address of a named Npcap adapter via iphlpapi ──────────────── */
+/* Uses GetAdaptersAddresses (Vista+) which returns all adapters, including
+ * those without an IP address (GetAdaptersInfo silently skips those). */
 static int get_adapter_mac(const char *adapter_name, uint8_t mac[6])
 {
+    /* Extract the GUID portion: \Device\NPF_{GUID} → find '{' */
     const char *guid_start = strstr(adapter_name, "{");
     if (!guid_start) return -1;
 
-    PIP_ADAPTER_INFO pInfo = NULL;
-    ULONG bufLen = 0;
-    GetAdaptersInfo(NULL, &bufLen);
-    pInfo = (PIP_ADAPTER_INFO)malloc(bufLen);
-    if (!pInfo) return -1;
+    /* Allocate buffer; start with 15 KB as Microsoft recommends */
+    ULONG bufLen = 15000;
+    PIP_ADAPTER_ADDRESSES pAddrs = NULL;
+    ULONG ret;
 
-    if (GetAdaptersInfo(pInfo, &bufLen) != ERROR_SUCCESS) {
-        free(pInfo);
+    do {
+        pAddrs = (PIP_ADAPTER_ADDRESSES)malloc(bufLen);
+        if (!pAddrs) return -1;
+        ret = GetAdaptersAddresses(AF_UNSPEC,
+                                   GAA_FLAG_SKIP_UNICAST |
+                                   GAA_FLAG_SKIP_ANYCAST |
+                                   GAA_FLAG_SKIP_MULTICAST |
+                                   GAA_FLAG_SKIP_DNS_SERVER,
+                                   NULL, pAddrs, &bufLen);
+        if (ret == ERROR_BUFFER_OVERFLOW) {
+            free(pAddrs);
+            pAddrs = NULL;
+        }
+    } while (ret == ERROR_BUFFER_OVERFLOW);
+
+    if (ret != NO_ERROR) {
+        free(pAddrs);
         return -1;
     }
 
     int found = -1;
-    for (PIP_ADAPTER_INFO p = pInfo; p; p = p->Next) {
-        char candidate[64];
-        snprintf(candidate, sizeof(candidate), "{%s}", p->AdapterName);
-        if (strstr(guid_start, p->AdapterName) ||
-            strstr(adapter_name, candidate)) {
-            if (p->AddressLength == 6) {
-                memcpy(mac, p->Address, 6);
-                found = 0;
-                break;
-            }
+    for (PIP_ADAPTER_ADDRESSES p = pAddrs; p; p = p->Next) {
+        /* p->AdapterName is "{GUID}" including braces */
+        if (p->PhysicalAddressLength == 6 &&
+            (strstr(adapter_name, p->AdapterName) != NULL)) {
+            memcpy(mac, p->PhysicalAddress, 6);
+            found = 0;
+            break;
         }
     }
-    free(pInfo);
+    free(pAddrs);
     return found;
 }
 
