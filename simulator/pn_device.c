@@ -69,7 +69,7 @@ static void compute_profidrive(DevState *dev)
 static void dcp_send_identify_response(DevState *dev, const uint8_t *req_buf)
 {
     /* req_buf[6..11] = source MAC of the controller (our dst) */
-    uint8_t frame[256] = {0};
+    uint8_t frame[512] = {0};
     int pos = 0;
 
     /* Ethernet header */
@@ -362,35 +362,39 @@ static void rpc_handle_connect(DevState *dev, const uint8_t *buf, int len,
     while (pos + 6 <= plen) {
         uint16_t blk_type = pn_get_u16be(payload, pos);
         uint16_t blk_len  = pn_get_u16be(payload, pos + 2);
-        /* version bytes at pos+4, pos+5 */
-        int data_start = pos + 4; /* block data after type+len (ver included in len) */
+        if (blk_len == 0) break; /* malformed — prevent infinite loop */
 
-        if (blk_type == 0x0101 && blk_len >= 46) {
-            /* ARBlockReq: ARType(2), ARUUID(16), SessionKey(2), InitiatorMACAdd(6) */
+        int data_start = pos + 4; /* block data starts after type(2)+len(2) */
+        int blk_end    = data_start + (int)blk_len;
+        if (blk_end > plen) break; /* block extends past packet end */
+
+        if (blk_type == 0x0101 && blk_len >= 28) {
+            /* ARBlockReq: ver(2) pad(2) ARType(2) ARUUID(16) SessionKey(2) CtrlMAC(6) ... */
             memcpy(dev->ar_uuid, payload + data_start + 4, 16);
             dev->session_key = pn_get_u16be(payload, data_start + 20);
             memcpy(dev->ctrl_mac, payload + data_start + 22, 6);
-        } else if (blk_type == 0x0102 && blk_len >= 40) {
-            /* IOCRBlockReq: IOCRType(2) IOCRRef(2) DataLength(2) FrameID(2) ClockFactor(2)... */
+        } else if (blk_type == 0x0102 && blk_len >= 14) {
+            /* IOCRBlockReq: ver(2) IOCRType(2) IOCRRef(2) RT_Class(2) DataLength(2) FrameID(2) ClockFactor(2)... */
             uint16_t iocr_type = pn_get_u16be(payload, data_start + 2);
             uint16_t iocr_ref  = pn_get_u16be(payload, data_start + 4);
-            uint16_t data_len  = pn_get_u16be(payload, data_start + 6);
-            uint16_t frame_id  = pn_get_u16be(payload, data_start + 8);
-            uint16_t clock_f   = pn_get_u16be(payload, data_start + 10);
+            uint16_t data_len  = pn_get_u16be(payload, data_start + 8);
+            uint16_t frame_id  = pn_get_u16be(payload, data_start + 10);
+            uint16_t clock_f   = (blk_len >= 14) ?
+                                 pn_get_u16be(payload, data_start + 12) : 128;
 
             if (iocr_type == 1) { /* Output (controller→device) */
-                dev->output_frame_id = frame_id;
-                dev->iocr_ref_out    = iocr_ref;
-                dev->data_length     = data_len;
-                dev->send_clock_factor = clock_f;
+                dev->output_frame_id   = frame_id;
+                dev->iocr_ref_out      = iocr_ref;
+                dev->data_length       = data_len;
+                dev->send_clock_factor = clock_f ? clock_f : 128;
             } else if (iocr_type == 2) { /* Input (device→controller) */
                 dev->input_frame_id = frame_id;
                 dev->iocr_ref_in    = iocr_ref;
             }
         }
 
-        pos += (int)blk_len + 4;
-        if ((blk_len + 4) & 1) pos++; /* pad to even */
+        pos = blk_end;
+        if (blk_end & 1) pos++; /* pad to even */
     }
 
     dev_log(dev, "RPC Connect: AR_UUID set, ctrl_mac=%02X:%02X:%02X:%02X:%02X:%02X",
@@ -565,8 +569,8 @@ static DWORD WINAPI dev_cyclic_thread(LPVOID param)
 static void rpc_handle_dcontrol(DevState *dev, const uint8_t *buf, int len,
                                 const struct sockaddr_in *from)
 {
-    /* Payload at +56 */
-    if (len < 62) return;
+    /* Payload at +56; ControlCommand is at payload[24..25] = buf[80..81] */
+    if (len < 82) return;
     const uint8_t *payload = buf + 56;
 
     /* ControlBlockConnect: BlockType(2) BlockLen(2) BlockVer(2) padding(2) ARUUID(16)
