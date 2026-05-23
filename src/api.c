@@ -317,6 +317,7 @@ int32_t PNAPI PN_WriteOutputs(PN_HANDLE handle, const uint8_t *data,
 {
     if (!handle || !data) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
+    if (ctx->state != PN_STATE_CYCLIC_ACTIVE) return PN_ERR_NOT_CONNECTED;
     if (length > PN_MAX_IO_LEN) return PN_ERR_BUFFER_TOO_SMALL;
     PN_LOCK(ctx->io_lock);
     memcpy(ctx->output_buf, data, length);
@@ -329,6 +330,7 @@ int32_t PNAPI PN_ReadInputs(PN_HANDLE handle, uint8_t *data, uint16_t length)
 {
     if (!handle || !data) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
+    if (ctx->state != PN_STATE_CYCLIC_ACTIVE) return PN_ERR_NOT_CONNECTED;
     if (length > PN_MAX_IO_LEN) return PN_ERR_BUFFER_TOO_SMALL;
     PN_LOCK(ctx->io_lock);
     memcpy(data, ctx->input_buf, length < ctx->input_len ? length : ctx->input_len);
@@ -344,6 +346,7 @@ int32_t PNAPI PN_DriveSetpoint(PN_HANDLE handle, uint16_t STW1, uint16_t NSOLL_A
 {
     if (!handle) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
+    if (ctx->state != PN_STATE_CYCLIC_ACTIVE) return PN_ERR_NOT_CONNECTED;
     uint8_t buf[PROFIDRIVE_T1_DATA_LEN];
     profidrive_encode_t1(buf, STW1, NSOLL_A);
     PN_LOCK(ctx->io_lock);
@@ -355,8 +358,9 @@ int32_t PNAPI PN_DriveSetpoint(PN_HANDLE handle, uint16_t STW1, uint16_t NSOLL_A
 
 int32_t PNAPI PN_DriveStatus(PN_HANDLE handle, uint16_t *ZSW1, uint16_t *NIST_A)
 {
-    if (!handle) return PN_ERR_INVALID_PARAM;
+    if (!handle || !ZSW1 || !NIST_A) return PN_ERR_INVALID_PARAM;
     PN_Context *ctx = pn_ctx(handle);
+    if (ctx->state != PN_STATE_CYCLIC_ACTIVE) return PN_ERR_NOT_CONNECTED;
     uint8_t buf[PROFIDRIVE_T1_DATA_LEN] = {0};
     PN_LOCK(ctx->io_lock);
     memcpy(buf, ctx->input_buf, PROFIDRIVE_T1_DATA_LEN);
