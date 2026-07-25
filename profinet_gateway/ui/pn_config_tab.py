@@ -117,9 +117,22 @@ class PnConfigTab(ttk.Frame):
     def _refresh_adapters(self):
         adapters = self._pn.enumerate_adapters()
         self._adapter_combo["values"] = adapters
-        if adapters and not self._adapter_var.get():
-            self._adapter_var.set(adapters[0])
-            self._adapter_combo.current(0)
+
+        # Heal a stale/mangled saved name (e.g. the double-brace bug) so the
+        # box shows — and Apply & Restart saves — the real Npcap device name.
+        current = self._adapter_var.get()
+        if current:
+            fixed = self._pn.resolve_adapter(current)
+            if fixed != current:
+                self._adapter_var.set(fixed)
+                current = fixed
+
+        if adapters:
+            if current in adapters:
+                self._adapter_combo.current(adapters.index(current))
+            elif not current:
+                self._adapter_var.set(adapters[0])
+                self._adapter_combo.current(0)
 
     # ── GSDML list management ─────────────────────────────────────────────────
     def _load_gsdml(self):
