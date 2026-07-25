@@ -37,14 +37,15 @@ def start_services(cfg: AppConfig, pn: ProfinetCtrl,
 def main():
     cfg = load_config()
 
-    # Create shared services
+    # Use a list cell so log() can reference the app before it's created
     log_lines = []
+    _app = [None]
 
     def log(msg: str):
         print(msg)
         log_lines.append(msg)
-        if hasattr(app, 'log'):
-            app.log(msg)
+        if _app[0] is not None:
+            _app[0].log(msg)
 
     pn = ProfinetCtrl(log_cb=log)
     gw = GatewayServer(log_cb=log)
@@ -62,14 +63,14 @@ def main():
     # Start services with initial config
     start_services(cfg, pn, gw, br, log)
 
-    # Launch GUI
-    app = MainWindow(pn, gw, br, cfg, on_restart)
+    # Launch GUI — assign to list cell so log() can forward messages to it
+    _app[0] = MainWindow(pn, gw, br, cfg, on_restart)
 
     # Replay buffered log messages into the GUI
     for msg in log_lines:
-        app.log(msg)
+        _app[0].log(msg)
 
-    app.mainloop()
+    _app[0].mainloop()
 
 
 if __name__ == "__main__":
