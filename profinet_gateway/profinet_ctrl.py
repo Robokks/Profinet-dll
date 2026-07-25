@@ -365,6 +365,11 @@ class ProfinetCtrl:
         if not ds.handle:
             return False
 
+        # Show exactly what we're about to send — catches malformed IPs/MACs
+        self._log(f"[PN] Connecting '{dc.station_name}': ip={dc.ip!r} mac={dc.mac!r} "
+                  f"slot={dc.slot} sub={dc.subslot} "
+                  f"mod=0x{dc.module_ident:08X} submod=0x{dc.submodule_ident:08X}")
+
         mac_bytes = self._str_to_mac(dc.mac)
         mac_arr = (ctypes.c_uint8 * 6)(*mac_bytes)
 

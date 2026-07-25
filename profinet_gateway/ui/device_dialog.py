@@ -227,10 +227,19 @@ class DeviceDialog(tk.Toplevel):
 
     # ── Apply / Cancel ────────────────────────────────────────────────────────
     def _on_apply(self):
-        # Validate IP
+        # Validate IP — must be a clean 4-octet dotted quad (the DLL rejects
+        # anything else with PN_ERR_INVALID_PARAM).
         ip = self._ip_var.get().strip()
         if not ip:
             messagebox.showerror("Validation", "IP address is required.", parent=self)
+            return
+        parts = ip.split(".")
+        if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            messagebox.showerror(
+                "Validation",
+                f"IP address '{ip}' is not valid.\n\n"
+                f"Use four numbers separated by dots, e.g. 127.0.0.1",
+                parent=self)
             return
 
         cfg = self._cfg
