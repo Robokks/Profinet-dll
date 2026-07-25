@@ -7,3 +7,7 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 install_manifest.txt
+
+# Python
+__pycache__/
+*.pyc
