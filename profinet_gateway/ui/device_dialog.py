@@ -59,8 +59,8 @@ class DeviceDialog(tk.Toplevel):
 
         ttk.Label(id_frame, text="MAC:").grid(row=4, column=0, sticky="w", **pad)
         self._mac_var = tk.StringVar()
-        mac_entry = ttk.Entry(id_frame, textvariable=self._mac_var, width=20, state="readonly")
-        mac_entry.grid(row=4, column=1, sticky="w", **pad)
+        self._mac_entry = ttk.Entry(id_frame, textvariable=self._mac_var, width=20, state="readonly")
+        self._mac_entry.grid(row=4, column=1, sticky="w", **pad)
 
         scan_btn = ttk.Button(id_frame, text="Scan Network", command=self._on_scan)
         scan_btn.grid(row=4, column=2, **pad)
@@ -143,9 +143,9 @@ class DeviceDialog(tk.Toplevel):
         self._ip_var.set(cfg.ip)
         self._subnet_var.set(cfg.subnet)
         self._gw_var.set(cfg.gateway)
-        self._mac_var.configure(state="normal")
+        self._mac_entry.configure(state="normal")
         self._mac_var.set(cfg.mac)
-        self._mac_var.configure(state="readonly")
+        self._mac_entry.configure(state="readonly")
         self._slot_var.set(cfg.slot)
         self._subslot_var.set(cfg.subslot)
 
@@ -216,9 +216,9 @@ class DeviceDialog(tk.Toplevel):
             vals = tv.item(sel[0])["values"]
             self._name_var.set(vals[0])
             self._ip_var.set(vals[1])
-            self._mac_var.configure(state="normal")
+            self._mac_entry.configure(state="normal")
             self._mac_var.set(vals[2])
-            self._mac_var.configure(state="readonly")
+            self._mac_entry.configure(state="readonly")
             self._scan_status.set(f"Selected: {vals[0]}")
             win.destroy()
 
