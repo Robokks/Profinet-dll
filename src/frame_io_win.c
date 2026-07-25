@@ -255,7 +255,13 @@ int frameio_enum_adapters(char names[][256], int max_count, int *out_count)
 
     int n = 0;
     for (PIP_ADAPTER_INFO p = pInfo; p && n < max_count; p = p->Next) {
-        snprintf(names[n], 256, "\\Device\\NPF_{%s}", p->AdapterName);
+        /* p->AdapterName may or may not already include braces {GUID}.
+         * Only add braces when they are missing, else we get \NPF_{{GUID}}
+         * which pcap_open_live cannot open. */
+        if (p->AdapterName[0] == '{')
+            snprintf(names[n], 256, "\\Device\\NPF_%s", p->AdapterName);
+        else
+            snprintf(names[n], 256, "\\Device\\NPF_{%s}", p->AdapterName);
         n++;
     }
     free(pInfo);

@@ -2,10 +2,16 @@
 
 import ctypes
 import os
+import re
 import sys
 import threading
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
+
+# GUID pattern (with or without surrounding braces), e.g.
+# DB8A414D-8038-417B-8174-F60B6E6E70A7
+_GUID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+                      r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 
 # ── Locate the DLL/SO ────────────────────────────────────────────────────────
 def _find_lib() -> str:
@@ -204,20 +210,47 @@ class ProfinetCtrl:
         return [bytes(names[i]).rstrip(b"\x00").decode(errors="replace")
                 for i in range(count.value)]
 
+    def resolve_adapter(self, adapter: str) -> str:
+        """Match a (possibly stale/mangled) adapter name to a live Npcap name.
+
+        Handles the double-brace bug ('\\Device\\NPF_{{GUID}}') and adapter
+        GUIDs that changed after an Npcap reinstall, by matching on the GUID.
+        Returns the corrected live name, or the original if no match found.
+        """
+        if not adapter:
+            return adapter
+        available = self.enumerate_adapters()
+        if adapter in available:
+            return adapter
+
+        # Try to match by GUID (ignores brace count / prefix differences)
+        m = _GUID_RE.search(adapter)
+        if m:
+            guid = m.group(0).upper()
+            for name in available:
+                nm = _GUID_RE.search(name)
+                if nm and nm.group(0).upper() == guid:
+                    self._log(f"[PN] Auto-corrected adapter name:")
+                    self._log(f"[PN]   from: {adapter}")
+                    self._log(f"[PN]   to  : {name}")
+                    return name
+
+        # No match — warn with the full available list
+        self._log(f"[PN] WARNING: adapter not found in Npcap list!")
+        self._log(f"[PN]   Requested: {adapter}")
+        self._log(f"[PN]   Available ({len(available)}): "
+                  + (", ".join(available) if available else "(none — Npcap not installed?)"))
+        self._log("[PN] Open Configuration, re-select the adapter and Apply & Restart.")
+        return adapter
+
     def start(self, adapter: str, dev_configs: list) -> bool:
         """Initialize one handle per device config, then configure each."""
         if not self._lib:
             return False
         self.stop()
 
-        # Diagnose adapter before trying to open it
-        available = self.enumerate_adapters()
-        if adapter and adapter not in available:
-            self._log(f"[PN] WARNING: saved adapter not found in Npcap list!")
-            self._log(f"[PN]   Saved  : {adapter}")
-            self._log(f"[PN]   Available ({len(available)}): "
-                      + (", ".join(available) if available else "(none — Npcap not installed?)"))
-            self._log("[PN] Open Configuration, re-select the adapter and Apply & Restart.")
+        # Self-heal a stale/mangled adapter name (double braces, changed GUID)
+        adapter = self.resolve_adapter(adapter)
 
         with self._lock:
             self._devices = []
@@ -305,6 +338,7 @@ class ProfinetCtrl:
         """Scan for Profinet devices on the network."""
         if not self._lib or not self._PN_DCPDiscover:
             return []
+        adapter = self.resolve_adapter(adapter)
         handle = ctypes.c_void_p(0)
         adapter_b = adapter.encode() if adapter else None
         rc = self._PN_Initialize(adapter_b, ctypes.byref(handle))
