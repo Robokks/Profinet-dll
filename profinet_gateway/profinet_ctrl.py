@@ -210,6 +210,79 @@ class ProfinetCtrl:
         return [bytes(names[i]).rstrip(b"\x00").decode(errors="replace")
                 for i in range(count.value)]
 
+    def enumerate_adapters_verbose(self) -> List[tuple]:
+        """Return [(npf_name, friendly_description), ...] by querying pcap
+        directly for human-readable descriptions. Falls back to
+        (name, name) if pcap descriptions are unavailable."""
+        names = self.enumerate_adapters()
+        desc_map = self._pcap_descriptions()
+        out = []
+        for n in names:
+            d = desc_map.get(n, "")
+            if not d:
+                # match by GUID in case of name-format differences
+                m = _GUID_RE.search(n)
+                if m:
+                    g = m.group(0).upper()
+                    for k, v in desc_map.items():
+                        km = _GUID_RE.search(k)
+                        if km and km.group(0).upper() == g:
+                            d = v
+                            break
+            if "loopback" in n.lower() and not d:
+                d = "Npcap Loopback Adapter"
+            out.append((n, d or "(no description)"))
+        return out
+
+    def _pcap_descriptions(self) -> dict:
+        """Load wpcap/libpcap directly and return {npf_name: description}."""
+        result = {}
+        try:
+            if sys.platform == "win32":
+                cands = [r"C:\Windows\System32\Npcap\wpcap.dll", "wpcap.dll"]
+            else:
+                cands = ["libpcap.so.1", "libpcap.so"]
+            pc = None
+            for c in cands:
+                try:
+                    pc = ctypes.CDLL(c)
+                    break
+                except OSError:
+                    continue
+            if not pc:
+                return result
+
+            class _pcap_if(ctypes.Structure):
+                pass
+            _pcap_if._fields_ = [
+                ("next",        ctypes.POINTER(_pcap_if)),
+                ("name",        ctypes.c_char_p),
+                ("description", ctypes.c_char_p),
+                ("addresses",   ctypes.c_void_p),
+                ("flags",       ctypes.c_uint),
+            ]
+            pc.pcap_findalldevs.argtypes = [ctypes.POINTER(ctypes.POINTER(_pcap_if)),
+                                            ctypes.c_char_p]
+            pc.pcap_findalldevs.restype = ctypes.c_int
+            pc.pcap_freealldevs.argtypes = [ctypes.POINTER(_pcap_if)]
+
+            alldevs = ctypes.POINTER(_pcap_if)()
+            errbuf = ctypes.create_string_buffer(256)
+            if pc.pcap_findalldevs(ctypes.byref(alldevs), errbuf) != 0:
+                return result
+            d = alldevs
+            while d:
+                node = d.contents
+                name = node.name.decode(errors="replace") if node.name else ""
+                desc = node.description.decode(errors="replace") if node.description else ""
+                if name:
+                    result[name] = desc
+                d = node.next
+            pc.pcap_freealldevs(alldevs)
+        except Exception as e:
+            self._log(f"[PN] Could not read adapter descriptions: {e}")
+        return result
+
     def resolve_adapter(self, adapter: str) -> str:
         """Match a (possibly stale/mangled) adapter name to a live Npcap name.
 

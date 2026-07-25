@@ -60,9 +60,13 @@ class PnConfigTab(ttk.Frame):
         top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
 
         ttk.Label(top, text="Adapter:").pack(side="left")
-        self._adapter_combo = ttk.Combobox(top, textvariable=self._adapter_var,
-                                            state="readonly", width=50)
+        # Display shows friendly names; _adapter_names[i] is the raw NPF name saved.
+        self._adapter_names: List[str] = []
+        self._adapter_display = tk.StringVar()
+        self._adapter_combo = ttk.Combobox(top, textvariable=self._adapter_display,
+                                            state="readonly", width=60)
         self._adapter_combo.pack(side="left", padx=4)
+        self._adapter_combo.bind("<<ComboboxSelected>>", self._on_adapter_select)
         ttk.Button(top, text="Refresh", command=self._refresh_adapters).pack(side="left", padx=4)
 
         # ── Left: GSDML list ──────────────────────────────────────────────────
@@ -114,9 +118,16 @@ class PnConfigTab(ttk.Frame):
         # Populate adapters
         self._refresh_adapters()
 
+    def _label_for(self, name: str, desc: str) -> str:
+        """Friendly dropdown label: 'Intel Ethernet — \\Device\\NPF_{GUID}'."""
+        short = desc if desc else "(no description)"
+        return f"{short}   —   {name}"
+
     def _refresh_adapters(self):
-        adapters = self._pn.enumerate_adapters()
-        self._adapter_combo["values"] = adapters
+        verbose = self._pn.enumerate_adapters_verbose()
+        self._adapter_names = [n for (n, _d) in verbose]
+        labels = [self._label_for(n, d) for (n, d) in verbose]
+        self._adapter_combo["values"] = labels
 
         # Heal a stale/mangled saved name (e.g. the double-brace bug) so the
         # box shows — and Apply & Restart saves — the real Npcap device name.
@@ -127,12 +138,21 @@ class PnConfigTab(ttk.Frame):
                 self._adapter_var.set(fixed)
                 current = fixed
 
-        if adapters:
-            if current in adapters:
-                self._adapter_combo.current(adapters.index(current))
-            elif not current:
-                self._adapter_var.set(adapters[0])
-                self._adapter_combo.current(0)
+        if not self._adapter_names:
+            return
+        # Select the saved adapter (or first) and reflect its friendly label.
+        if current in self._adapter_names:
+            idx = self._adapter_names.index(current)
+        else:
+            idx = 0
+            self._adapter_var.set(self._adapter_names[0])
+        self._adapter_combo.current(idx)
+        self._adapter_display.set(labels[idx])
+
+    def _on_adapter_select(self, _event=None):
+        idx = self._adapter_combo.current()
+        if 0 <= idx < len(self._adapter_names):
+            self._adapter_var.set(self._adapter_names[idx])
 
     # ── GSDML list management ─────────────────────────────────────────────────
     def _load_gsdml(self):
