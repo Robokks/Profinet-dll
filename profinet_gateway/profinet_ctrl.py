@@ -209,6 +209,16 @@ class ProfinetCtrl:
         if not self._lib:
             return False
         self.stop()
+
+        # Diagnose adapter before trying to open it
+        available = self.enumerate_adapters()
+        if adapter and adapter not in available:
+            self._log(f"[PN] WARNING: saved adapter not found in Npcap list!")
+            self._log(f"[PN]   Saved  : {adapter}")
+            self._log(f"[PN]   Available ({len(available)}): "
+                      + (", ".join(available) if available else "(none — Npcap not installed?)"))
+            self._log("[PN] Open Configuration, re-select the adapter and Apply & Restart.")
+
         with self._lock:
             self._devices = []
         ok = True
@@ -219,7 +229,11 @@ class ProfinetCtrl:
             rc = self._PN_Initialize(adapter_b, ctypes.byref(handle))
             if rc != PN_OK:
                 ds.error = rc_str(rc)
-                self._log(f"[PN] PN_Initialize failed for {dc.station_name}: {rc_str(rc)}")
+                self._log(f"[PN] PN_Initialize failed for '{dc.station_name}': {rc_str(rc)}")
+                if rc == -5:  # PN_ERR_PCAP_OPEN
+                    self._log(f"[PN]   → pcap_open_live failed on adapter: {adapter!r}")
+                    self._log(f"[PN]   → Run app as Administrator OR reinstall Npcap")
+                    self._log(f"[PN]       without 'Restrict to Admins' option.")
                 ok = False
             else:
                 ds.handle = handle
