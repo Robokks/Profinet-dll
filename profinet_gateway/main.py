@@ -51,6 +51,19 @@ def main():
     gw = GatewayServer(log_cb=log)
     br = Bridge(pn, gw, log_cb=log)
 
+    # One-time self-heal: if config.json holds a stale/mangled adapter name
+    # (e.g. the old double-brace \Device\NPF_{{GUID}} bug), rewrite it to the
+    # real Npcap device name so the file is permanently clean.
+    if cfg.adapter:
+        healed = pn.resolve_adapter(cfg.adapter)
+        if healed != cfg.adapter:
+            cfg.adapter = healed
+            try:
+                save_config(cfg)
+                log("[APP] Cleaned adapter name in config.json")
+            except Exception as e:
+                log(f"[APP] Could not save cleaned config: {e}")
+
     def on_restart():
         """Called after Apply & Restart in ConfigWindow."""
         log("[APP] Restarting services…")
