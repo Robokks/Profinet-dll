@@ -72,6 +72,13 @@ class MainWindow(tk.Tk):
                              command=self._open_diagnostic)
         diag_btn.grid(row=0, column=1, padx=16)
 
+        discovery_btn = tk.Button(btn_frame, text="Network Discovery",
+                                  font=("Arial", 13), width=18, height=2,
+                                  bg="#00838f", fg="white", relief="flat",
+                                  activebackground="#00a0b0",
+                                  command=self._open_discovery)
+        discovery_btn.grid(row=0, column=2, padx=16)
+
         # ── Log ──────────────────────────────────────────────────────────────
         log_frame = ttk.LabelFrame(self, text="Log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
@@ -149,6 +156,10 @@ class MainWindow(tk.Tk):
     def _open_diagnostic(self):
         from ui.io_diagnostic import IODiagnosticWindow
         IODiagnosticWindow(self, self._pn, self._gw)
+
+    def _open_discovery(self):
+        from ui.discovery_window import DiscoveryWindow
+        DiscoveryWindow(self, self._pn, self._cfg)
 
     def _on_close(self):
         self._bridge.stop()

@@ -38,6 +38,11 @@ class ScanResult:
     name_of_station: bytes
     ip_str: bytes
     mac: bytes            # 6 raw bytes
+    netmask: str = ""
+    gateway: str = ""
+    vendor_name: str = ""
+    vendor_id: int = 0
+    device_id: int = 0
 
 
 @dataclass
@@ -278,12 +283,75 @@ class ProfinetCtrl:
                     out.append(ScanResult(
                         name_of_station=(d.name or "").encode(),
                         ip_str=(d.ip or "").encode(),
-                        mac=mac_raw))
+                        mac=mac_raw,
+                        netmask=getattr(d, "netmask", "") or "",
+                        gateway=getattr(d, "gateway", "") or "",
+                        vendor_name=getattr(d, "vendor_name", "") or "",
+                        vendor_id=getattr(d, "vendor_id", 0) or 0,
+                        device_id=getattr(d, "device_id", 0) or 0))
             finally:
                 sock.close()
         except Exception as e:
             self._log(f"[PN] DCP discover error: {e}")
         return out
+
+    # ── DCP actions (Network Discovery window) ──────────────────────────────
+    def _dcp_socket(self, adapter: str):
+        """Open a raw socket + fetch controller MAC for a DCP action."""
+        from profinet.util import ethernet_socket, get_mac
+        adapter = self.resolve_adapter(adapter)
+        sock = ethernet_socket(adapter, 3)
+        return sock, get_mac(adapter)
+
+    def dcp_set_name(self, adapter: str, mac: str, name: str) -> bool:
+        if not self._ok:
+            return False
+        try:
+            from profinet import dcp
+            sock, src = self._dcp_socket(adapter)
+            try:
+                ok = dcp.set_param(sock, src, mac.lower(), "name", name)
+            finally:
+                sock.close()
+            self._log(f"[PN] DCP SetName '{name}' -> {mac}: {'OK' if ok else 'no response'}")
+            return bool(ok)
+        except Exception as e:
+            self._log(f"[PN] DCP SetName error: {e}")
+            return False
+
+    def dcp_set_ip(self, adapter: str, mac: str, ip: str,
+                   subnet: str, gateway: str, permanent: bool = True) -> bool:
+        if not self._ok:
+            return False
+        try:
+            from profinet import dcp
+            sock, src = self._dcp_socket(adapter)
+            try:
+                ok = dcp.set_ip(sock, src, mac.lower(), ip, subnet, gateway,
+                                permanent=permanent)
+            finally:
+                sock.close()
+            self._log(f"[PN] DCP SetIP {ip} -> {mac}: {'OK' if ok else 'no response'}")
+            return bool(ok)
+        except Exception as e:
+            self._log(f"[PN] DCP SetIP error: {e}")
+            return False
+
+    def dcp_flash_led(self, adapter: str, mac: str, duration_ms: int = 3000) -> bool:
+        if not self._ok:
+            return False
+        try:
+            from profinet import dcp
+            sock, src = self._dcp_socket(adapter)
+            try:
+                ok = dcp.signal_device(sock, src, mac.lower(), duration_ms=duration_ms)
+            finally:
+                sock.close()
+            self._log(f"[PN] DCP Flash LED -> {mac}: {'OK' if ok else 'no response'}")
+            return bool(ok)
+        except Exception as e:
+            self._log(f"[PN] DCP Flash LED error: {e}")
+            return False
 
     # ── cyclic IO ───────────────────────────────────────────────────────────
     def write_outputs(self, idx: int, stw1: int, nsoll: int):
