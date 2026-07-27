@@ -61,7 +61,8 @@ class DeviceDialog(tk.Toplevel):
         # Navigation tree
         navf = ttk.LabelFrame(body, text="Navigation Area")
         navf.pack(side="left", fill="y", padx=6, pady=6)
-        self._nav = ttk.Treeview(navf, show="tree", selectmode="browse", width=22)
+        self._nav = ttk.Treeview(navf, show="tree", selectmode="browse")
+        self._nav.column("#0", width=180, stretch=False)
         self._nav.pack(fill="y", expand=True, padx=2, pady=2)
         cfgn = self._nav.insert("", "end", text="Configuration", open=True)
         self._nav.insert(cfgn, "end", iid="General", text="  General")
