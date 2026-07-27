@@ -196,6 +196,12 @@ class ProfinetCtrl:
         if ds is None:
             return False
         dc = ds.config
+        if not dc.station_name:
+            ds.connected = False
+            ds.error = "no station name — configure it"
+            self._log(f"[PN] Device at {dc.ip}: no station name set — open "
+                      f"Configuration, set the station name, Apply & Restart.")
+            return False
         try:
             from profinet import dcp, rpc
             from profinet.rt import build_iocr_configs
