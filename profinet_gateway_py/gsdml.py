@@ -177,6 +177,7 @@ def _extract_names_and_identity(path: str):
     if not device_name:
         device_name = os.path.splitext(os.path.basename(path))[0]
 
+    # 1. Embedded base64 <GraphicData> (some GSDMLs)
     for gd in _iter(root, "GraphicData"):
         if gd.text:
             try:
@@ -185,7 +186,57 @@ def _extract_names_and_identity(path: str):
             except Exception:
                 pass
 
+    # 2. External bitmap file referenced by <GraphicItem GraphicFile="..."/>
+    #    (Siemens SINAMICS etc.) — the file (e.g. GSDML-002A-0501-S120.bmp)
+    #    lives next to the .xml; GraphicFile has no extension.
+    if bitmap is None:
+        target = None
+        for ref in _iter(root, "GraphicItemRef"):
+            if ref.get("Type") == "DeviceSymbol":
+                target = ref.get("GraphicItemTarget")
+                break
+        gfile = None
+        for gi in _iter(root, "GraphicItem"):
+            if target and gi.get("ID") == target and gi.get("GraphicFile"):
+                gfile = gi.get("GraphicFile")
+                break
+        if gfile is None:  # fallback: first GraphicItem with a file
+            for gi in _iter(root, "GraphicItem"):
+                if gi.get("GraphicFile"):
+                    gfile = gi.get("GraphicFile")
+                    break
+        if gfile:
+            bitmap = _read_graphic_file(os.path.dirname(os.path.abspath(path)), gfile)
+
     return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap
+
+
+def _read_graphic_file(base_dir: str, gfile: str) -> Optional[bytes]:
+    """Read an external GSDML bitmap file. GraphicFile usually has no
+    extension, so try common image extensions, case-insensitively."""
+    names = [gfile]
+    if "." not in os.path.basename(gfile):
+        names = [gfile + ext for ext in (".bmp", ".png", ".gif", ".jpg", ".jpeg")]
+    try:
+        listing = {fn.lower(): fn for fn in os.listdir(base_dir)}
+    except OSError:
+        listing = {}
+    for cand in names:
+        p = os.path.join(base_dir, cand)
+        if os.path.exists(p):
+            try:
+                with open(p, "rb") as fh:
+                    return fh.read()
+            except OSError:
+                pass
+        real = listing.get(os.path.basename(cand).lower())
+        if real:
+            try:
+                with open(os.path.join(base_dir, real), "rb") as fh:
+                    return fh.read()
+            except OSError:
+                pass
+    return None
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
