@@ -1,53 +1,32 @@
-"""gsdml.py — GSDML XML parser for Profinet device description files"""
+"""gsdml.py — GSDML parser (profinet-py backed) with full telegram listing.
 
-import xml.etree.ElementTree as ET
-import base64
+Drop-in replacement for the DLL-version gsdml.py: same GSDMLDevice /
+ModuleInfo / SubmoduleInfo dataclasses and the same parse_gsdml() /
+load_device_image() entry points, so the UI is untouched.
+
+Protocol-critical data (module ident, submodule ident, input/output byte
+lengths) comes from profinet-py's profinet.gsdml.load_gsdml(). profinet-py does
+NOT resolve GSDML TextId references into human-readable names, so a light
+ElementTree pass adds: TextId->text resolution, DeviceIdentity, and the device
+bitmap (GraphicsList). The Submodule list = EVERY telegram the GSDML defines
+(Standard Telegram 1..32, SIEMENS Telegram 111/350/352/353/370, Free/Flexible).
+"""
+
 import os
 import io
+import base64
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 
-# Tkinter PhotoImage helper (imported lazily to allow headless use)
-_tk_available = True
 try:
-    import tkinter as tk
     from PIL import Image, ImageTk
     _pil_available = True
 except ImportError:
     _pil_available = False
 
-# GSDML uses a default namespace
-_NS_PREFIX = "{http://www.profibus.com/GSDML/DeviceProfile/2.4/GSDML-DeviceProfile}"
-_NS_PREFIXES = [
-    "{http://www.profibus.com/GSDML/DeviceProfile/2.4/GSDML-DeviceProfile}",
-    "{http://www.profibus.com/GSDML/DeviceProfile/2.3/GSDML-DeviceProfile}",
-    "{http://www.profibus.com/GSDML/DeviceProfile/2.2/GSDML-DeviceProfile}",
-    "{http://www.profibus.com/GSDML/DeviceProfile/2.1/GSDML-DeviceProfile}",
-    "",   # no namespace fallback
-]
 
-def _find(elem, tag):
-    """Find a sub-element trying all known GSDML namespaces."""
-    for ns in _NS_PREFIXES:
-        found = elem.find(ns + tag)
-        if found is not None:
-            return found
-    return None
-
-def _findall(elem, tag):
-    for ns in _NS_PREFIXES:
-        found = elem.findall(ns + tag)
-        if found:
-            return found
-    return []
-
-def _attr(elem, *keys, default=""):
-    for k in keys:
-        v = elem.get(k)
-        if v is not None:
-            return v
-    return default
-
+# ── Dataclasses (identical shape to the DLL-version parser) ──────────────────
 @dataclass
 class SubmoduleInfo:
     ident: int
@@ -55,11 +34,13 @@ class SubmoduleInfo:
     input_length: int   # bytes device→controller
     output_length: int  # bytes controller→device
 
+
 @dataclass
 class ModuleInfo:
     ident: int
     name: str
     submodules: List[SubmoduleInfo] = field(default_factory=list)
+
 
 @dataclass
 class GSDMLDevice:
@@ -69,7 +50,6 @@ class GSDMLDevice:
     vendor_id: int
     device_id: int
     modules: List[ModuleInfo] = field(default_factory=list)
-    # bitmap: base64-encoded PNG bytes or None
     bitmap_data: Optional[bytes] = None
 
     def display_name(self) -> str:
@@ -89,155 +69,173 @@ class GSDMLDevice:
                     return s
         return None
 
-def parse_gsdml(path: str) -> GSDMLDevice:
-    """Parse a GSDML .xml file and return a GSDMLDevice."""
-    tree = ET.parse(path)
-    root = tree.getroot()
 
-    # Strip namespace from tag for detection
-    def _ns_tag(elem):
-        tag = elem.tag
-        if "}" in tag:
-            return tag.split("}")[1]
-        return tag
+# ── ElementTree helpers (namespace-agnostic) ─────────────────────────────────
+def _local(tag: str) -> str:
+    return tag.split("}", 1)[1] if "}" in tag else tag
 
-    # Detect namespace from root
-    global _NS_PREFIX
-    if "}" in root.tag:
-        _NS_PREFIX = root.tag.split("}")[0] + "}"
-    else:
-        _NS_PREFIX = ""
 
-    # DeviceIdentity
-    dev_id_elem = _find(root, "Device/DeviceIdentity")
-    if dev_id_elem is None:
-        # try direct
-        dev_id_elem = _find(root, "DeviceIdentity")
+def _iter(root, name: str):
+    for el in root.iter():
+        if _local(el.tag) == name:
+            yield el
 
-    vendor_name = ""
-    device_name = ""
-    vendor_id = 0
-    device_id = 0
 
-    if dev_id_elem is not None:
-        vendor_id_str = _attr(dev_id_elem, "VendorID", "Vendor_ID", default="0x0000")
-        device_id_str = _attr(dev_id_elem, "DeviceID", "Device_ID", default="0x0000")
-        try:
-            vendor_id = int(vendor_id_str, 16) if vendor_id_str.startswith("0x") else int(vendor_id_str)
-        except Exception:
-            vendor_id = 0
-        try:
-            device_id = int(device_id_str, 16) if device_id_str.startswith("0x") else int(device_id_str)
-        except Exception:
-            device_id = 0
-        # InfoText / VendorName
-        info = _find(dev_id_elem, "InfoText")
-        if info is None:
-            info = _find(root, "Device/DeviceIdentity/InfoText")
-        vendor_name = _attr(dev_id_elem, "VendorName", default="")
+def _first(root, name: str):
+    for el in _iter(root, name):
+        return el
+    return None
 
-    # DeviceFunction → NameOfStation hint
-    dev_func = _find(root, "Device/DeviceFunction")
-    if dev_func is None:
-        dev_func = _find(root, "DeviceFunction")
 
-    # Try to get device name from multiple places
-    dev_access = _find(root, "Device/DeviceAccessPointList/DeviceAccessPointItem")
-    if dev_access is not None:
-        device_name = _attr(dev_access, "DNS_CompatibleName", "SubnetMask", default="")
+def _to_int(s: str, default: int = 0) -> int:
+    if not s:
+        return default
+    try:
+        s = s.strip()
+        return int(s, 16) if s.lower().startswith("0x") else int(s)
+    except (ValueError, TypeError):
+        return default
+
+
+def _build_text_map(root) -> Dict[str, str]:
+    """TextId -> human text, from every <Text TextId=.. Value=../>."""
+    tmap: Dict[str, str] = {}
+    for t in _iter(root, "Text"):
+        tid = t.get("TextId")
+        val = t.get("Value")
+        if tid and val is not None:
+            tmap[tid] = val
+    return tmap
+
+
+def _resolve_name(item, tmap: Dict[str, str]) -> str:
+    """Resolve a Module/Submodule item's display name via its <Name TextId>.
+
+    Looks for a <Name .../> (often under <ModuleInfo>) with a TextId (resolved
+    through tmap) or a literal Value/Name attribute. Falls back to the item's
+    own Name/ID attribute.
+    """
+    for nm in _iter(item, "Name"):
+        tid = nm.get("TextId")
+        if tid and tid in tmap:
+            return tmap[tid]
+        val = nm.get("Value")
+        if val:
+            return val
+        if nm.text and nm.text.strip():
+            return nm.text.strip()
+    for k in ("Name", "ID"):
+        v = item.get(k)
+        if v:
+            return v
+    return ""
+
+
+def _extract_names_and_identity(path: str):
+    """Return (id2name, identity, bitmap) parsed straight from the XML.
+
+    id2name: maps a Module/Submodule item's ID attribute -> resolved name.
+    identity: (vendor_name, device_name, vendor_id, device_id).
+    bitmap: base64-decoded PNG bytes from GraphicsList, or None.
+    """
+    id2name: Dict[str, str] = {}
+    vendor_name = device_name = ""
+    vendor_id = device_id = 0
+    bitmap: Optional[bytes] = None
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap
+
+    tmap = _build_text_map(root)
+
+    for tag in ("ModuleItem", "SubmoduleItem", "VirtualSubmoduleItem",
+                "DeviceAccessPointItem"):
+        for item in _iter(root, tag):
+            iid = item.get("ID")
+            if iid:
+                id2name[iid] = _resolve_name(item, tmap)
+
+    di = _first(root, "DeviceIdentity")
+    if di is not None:
+        vendor_id = _to_int(di.get("VendorID", "0"))
+        device_id = _to_int(di.get("DeviceID", "0"))
+        vendor_name = di.get("VendorName", "") or ""
+        info = _first(di, "InfoText")
+        if info is not None and not vendor_name:
+            vendor_name = info.get("Value", "") or ""
+
+    dap = _first(root, "DeviceAccessPointItem")
+    if dap is not None:
+        device_name = dap.get("DNS_CompatibleName", "") or ""
     if not device_name:
-        # Use filename stem
         device_name = os.path.splitext(os.path.basename(path))[0]
 
-    # ModuleList
+    for gd in _iter(root, "GraphicData"):
+        if gd.text:
+            try:
+                bitmap = base64.b64decode(gd.text.strip())
+                break
+            except Exception:
+                pass
+
+    return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap
+
+
+# ── Main entry point ─────────────────────────────────────────────────────────
+def parse_gsdml(path: str) -> GSDMLDevice:
+    """Parse a GSDML file into a GSDMLDevice, listing every telegram."""
+    from profinet.gsdml import load_gsdml   # profinet-py (GPL-3.0)
+
+    id2name, (vendor_name, device_name, vendor_id, device_id), bitmap = \
+        _extract_names_and_identity(path)
+
+    dev = load_gsdml(path)
+    if vendor_id == 0:
+        vendor_id = getattr(dev, "vendor_id", 0)
+    if device_id == 0:
+        device_id = getattr(dev, "device_id", 0)
+
+    catalog = dev.submodule_catalog  # {id: GSDMLSubmodule}
+
+    def _sub_info(sub) -> SubmoduleInfo:
+        return SubmoduleInfo(
+            ident=sub.submodule_ident,
+            name=id2name.get(sub.id, sub.id),
+            input_length=sub.input_length,
+            output_length=sub.output_length,
+        )
+
     modules: List[ModuleInfo] = []
-    module_list = _find(root, "ProfileBody/ApplicationProcess/DeviceAccessPointList")
-    if module_list is None:
-        module_list = _find(root, "ApplicationProcess/DeviceAccessPointList")
+    for mid, m in dev.modules.items():
+        telegrams: List[SubmoduleInfo] = []
+        seen = set()
+        # inline (Virtual)SubmoduleItems on the module
+        for sub in getattr(m, "submodules", []):
+            if sub.id not in seen:
+                telegrams.append(_sub_info(sub)); seen.add(sub.id)
+        # UseableSubmodules -> resolve against the catalog
+        for sub_id in getattr(m, "useable_submodules", {}) or {}:
+            sub = catalog.get(sub_id)
+            if sub is not None and sub.id not in seen:
+                telegrams.append(_sub_info(sub)); seen.add(sub.id)
+        # a module that references nothing gets the whole catalog
+        if not telegrams:
+            for sub in catalog.values():
+                telegrams.append(_sub_info(sub))
+        modules.append(ModuleInfo(
+            ident=m.module_ident,
+            name=id2name.get(m.id, m.id),
+            submodules=telegrams,
+        ))
 
-    # Parse ModuleList
-    ml = _find(root, "ProfileBody/ApplicationProcess/ModuleList")
-    if ml is None:
-        ml = _find(root, "ApplicationProcess/ModuleList")
-
-    submodule_map: Dict[int, SubmoduleInfo] = {}  # ident → SubmoduleInfo
-
-    # Parse SubmoduleList first
-    sml = _find(root, "ProfileBody/ApplicationProcess/SubmoduleList")
-    if sml is None:
-        sml = _find(root, "ApplicationProcess/SubmoduleList")
-    if sml is not None:
-        for smi in _findall(sml, "SubmoduleItem"):
-            sub_ident_str = _attr(smi, "ID", "SubmoduleIdentNumber", default="0")
-            try:
-                sub_ident = int(sub_ident_str, 16) if sub_ident_str.startswith("0x") else int(sub_ident_str)
-            except Exception:
-                sub_ident = 0
-            sub_name = _attr(smi, "SubmoduleName", "Name", default=f"Submodule_{sub_ident:#x}")
-            # IOData
-            in_len = 0
-            out_len = 0
-            io_data = _find(smi, "IOData")
-            if io_data is not None:
-                inp = _find(io_data, "Input")
-                if inp is not None:
-                    in_len = int(_attr(inp, "Length", default="0"))
-                out = _find(io_data, "Output")
-                if out is not None:
-                    out_len = int(_attr(out, "Length", default="0"))
-            submodule_map[sub_ident] = SubmoduleInfo(
-                ident=sub_ident,
-                name=sub_name,
-                input_length=in_len,
-                output_length=out_len,
-            )
-
-    if ml is not None:
-        for mi in _findall(ml, "ModuleItem"):
-            mod_ident_str = _attr(mi, "ID", "ModuleIdentNumber", default="0")
-            try:
-                mod_ident = int(mod_ident_str, 16) if mod_ident_str.startswith("0x") else int(mod_ident_str)
-            except Exception:
-                mod_ident = 0
-            mod_name = _attr(mi, "ModuleName", "Name", default=f"Module_{mod_ident:#x}")
-            # Find useable submodules
-            subs: List[SubmoduleInfo] = []
-            useable = _find(mi, "UseableSubmodules")
-            if useable is not None:
-                for sr in _findall(useable, "SubmoduleItemRef"):
-                    ref_str = _attr(sr, "SubmoduleItemTarget", "ID", default="0")
-                    try:
-                        ref = int(ref_str, 16) if ref_str.startswith("0x") else int(ref_str)
-                    except Exception:
-                        ref = 0
-                    if ref in submodule_map:
-                        subs.append(submodule_map[ref])
-            if not subs and submodule_map:
-                # fallback: attach all submodules
-                subs = list(submodule_map.values())
-            modules.append(ModuleInfo(ident=mod_ident, name=mod_name, submodules=subs))
-
-    # If no modules parsed, create a generic one
+    # No modules at all: expose every catalog telegram under a default module.
     if not modules:
-        subs = list(submodule_map.values()) if submodule_map else [
-            SubmoduleInfo(ident=1, name="Telegram 1 (4B in/out)", input_length=4, output_length=4)
-        ]
-        modules.append(ModuleInfo(ident=1, name="Default Module", submodules=subs))
-
-    # Bitmap — look in GraphicsList
-    bitmap_data: Optional[bytes] = None
-    gl = _find(root, "ProfileBody/ApplicationProcess/GraphicsList")
-    if gl is None:
-        gl = _find(root, "ApplicationProcess/GraphicsList")
-    if gl is not None:
-        for gi in list(gl):
-            data_elem = _find(gi, "GraphicData")
-            if data_elem is not None and data_elem.text:
-                try:
-                    bitmap_data = base64.b64decode(data_elem.text.strip())
-                    break
-                except Exception:
-                    pass
+        telegrams = [_sub_info(s) for s in catalog.values()]
+        if not telegrams:
+            telegrams = [SubmoduleInfo(1, "Standard Telegram 1", 4, 4)]
+        modules.append(ModuleInfo(ident=1, name="Default Module",
+                                  submodules=telegrams))
 
     return GSDMLDevice(
         path=path,
@@ -246,7 +244,7 @@ def parse_gsdml(path: str) -> GSDMLDevice:
         vendor_id=vendor_id,
         device_id=device_id,
         modules=modules,
-        bitmap_data=bitmap_data,
+        bitmap_data=bitmap,
     )
 
 
@@ -257,20 +255,16 @@ def load_device_image(dev: GSDMLDevice, size=(64, 64)):
 
     if dev.bitmap_data and _pil_available:
         try:
-            img = Image.open(io.BytesIO(dev.bitmap_data))
-            img = img.resize(size, Image.LANCZOS)
+            img = Image.open(io.BytesIO(dev.bitmap_data)).resize(size, Image.LANCZOS)
             return ImageTk.PhotoImage(img)
         except Exception:
             pass
-
     if _pil_available and os.path.exists(default_path):
         try:
             img = Image.open(default_path).resize(size, Image.LANCZOS)
             return ImageTk.PhotoImage(img)
         except Exception:
             pass
-
-    # Minimal fallback: 64x64 grey PNG via tkinter
     try:
         import tkinter as tk
         return tk.PhotoImage(width=size[0], height=size[1])
