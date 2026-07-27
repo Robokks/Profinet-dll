@@ -71,6 +71,7 @@ class DeviceState:
     src_mac: bytes = b""
     slot: int = 1
     subslot: int = 1
+    dos: list = field(default_factory=list)   # [(slot, subslot, out_len, in_len)]
 
 
 class ProfinetCtrl:
@@ -220,12 +221,16 @@ class ProfinetCtrl:
             finally:
                 sock.close()
 
-            # 2. AR connect with an IOCR built from the configured telegram
-            io_slots = [rpc.IOSlot(slot=dc.slot, subslot=dc.subslot,
-                                   input_length=dc.input_length,
-                                   output_length=dc.output_length,
-                                   module_ident=dc.module_ident,
-                                   submodule_ident=dc.submodule_ident)]
+            # 2. AR connect with one IOCR slot per Drive Object in the rack
+            dos = dc.effective_drive_objects()
+            io_slots = [rpc.IOSlot(slot=d.slot, subslot=d.subslot,
+                                   input_length=d.input_length,
+                                   output_length=d.output_length,
+                                   module_ident=d.module_ident,
+                                   submodule_ident=d.submodule_ident)
+                        for d in dos]
+            ds.dos = [(d.slot, d.subslot, d.output_length, d.input_length) for d in dos]
+            ds.slot, ds.subslot = dos[0].slot, dos[0].subslot
             conn = rpc.RPCCon(info)
             setup = rpc.IOCRSetup(slots=io_slots,
                                   send_clock_factor=_SEND_CLOCK_FACTOR,
@@ -373,7 +378,17 @@ class ProfinetCtrl:
         if not ds or not ds.connected or not ds.cyclic:
             return
         try:
-            ds.cyclic.set_output_data(ds.slot, ds.subslot, bytes(data))
+            data = bytes(data)
+            if not ds.dos:
+                ds.cyclic.set_output_data(ds.slot, ds.subslot, data)
+                return
+            off = 0
+            for (slot, subslot, out_len, _in_len) in ds.dos:
+                if out_len <= 0:
+                    continue
+                chunk = data[off:off + out_len].ljust(out_len, b"\x00")
+                ds.cyclic.set_output_data(slot, subslot, chunk)
+                off += out_len
         except Exception as e:
             self._log(f"[PN] write_raw_outputs error: {e}")
 
@@ -394,9 +409,17 @@ class ProfinetCtrl:
         if not ds or not ds.connected or not ds.cyclic:
             return bytes(length)
         try:
-            data = ds.cyclic.get_input_data(ds.slot, ds.subslot)
-            if data:
-                return bytes(data[:length]).ljust(length, b"\x00")
+            if not ds.dos:
+                data = ds.cyclic.get_input_data(ds.slot, ds.subslot)
+                return (bytes(data[:length]).ljust(length, b"\x00")
+                        if data else bytes(length))
+            out = bytearray()
+            for (slot, subslot, _out_len, in_len) in ds.dos:
+                if in_len <= 0:
+                    continue
+                data = ds.cyclic.get_input_data(slot, subslot) or b""
+                out += bytes(data[:in_len]).ljust(in_len, b"\x00")
+            return bytes(out[:length]).ljust(length, b"\x00")
         except Exception as e:
             self._log(f"[PN] read_raw_inputs error: {e}")
         return bytes(length)

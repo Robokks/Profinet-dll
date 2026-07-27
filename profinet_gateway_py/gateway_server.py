@@ -54,7 +54,7 @@ class GatewayServer:
         self._device_configs = device_configs
         with self._lock:
             self._io = [
-                {"out": bytearray(dc.output_length), "inp": bytearray(dc.input_length)}
+                {"out": bytearray(dc.total_output_length()), "inp": bytearray(dc.total_input_length())}
                 for dc in device_configs
             ]
 
@@ -140,8 +140,8 @@ class GatewayServer:
 
     def _handle_tcp_client(self, conn: socket.socket):
         conn.settimeout(0.1)
-        out_size = sum(dc.output_length for dc in self._device_configs)
-        inp_size = sum(dc.input_length  for dc in self._device_configs)
+        out_size = sum(dc.total_output_length() for dc in self._device_configs)
+        inp_size = sum(dc.total_input_length()  for dc in self._device_configs)
 
         while self._running:
             # Receive output frame from client
@@ -154,7 +154,7 @@ class GatewayServer:
                     offset = 0
                     with self._lock:
                         for i, dc in enumerate(self._device_configs):
-                            n = dc.output_length
+                            n = dc.total_output_length()
                             self._io[i]["out"][:n] = data[offset:offset + n]
                             offset += n
                 except socket.timeout:
@@ -204,8 +204,8 @@ class GatewayServer:
             self._running = False
             return
 
-        out_size = sum(dc.output_length for dc in self._device_configs)
-        inp_size = sum(dc.input_length  for dc in self._device_configs)
+        out_size = sum(dc.total_output_length() for dc in self._device_configs)
+        inp_size = sum(dc.total_input_length()  for dc in self._device_configs)
 
         while self._running:
             try:
@@ -215,7 +215,7 @@ class GatewayServer:
                     offset = 0
                     with self._lock:
                         for i, dc in enumerate(self._device_configs):
-                            n = dc.output_length
+                            n = dc.total_output_length()
                             self._io[i]["out"][:n] = data[offset:offset + n]
                             offset += n
                 # Reply with inputs

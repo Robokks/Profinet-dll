@@ -39,22 +39,24 @@ class Bridge:
                 if ds is None:
                     continue
                 dc = ds.config
+                out_total = dc.total_output_length()
+                in_total = dc.total_input_length()
 
-                # Gateway → Profinet outputs
-                out_data = self._gw.get_outputs(i)
-                if dc.output_length >= 4 and len(out_data) >= 4:
-                    stw1  = struct.unpack_from("<H", out_data, 0)[0]
-                    nsoll = struct.unpack_from("<H", out_data, 2)[0]
-                    self._pn.write_outputs(i, stw1, nsoll)
-                elif dc.output_length > 0:
-                    self._pn.write_raw_outputs(i, bytes(out_data))
+                # Gateway → Profinet outputs (raw frame split across the rack)
+                out_data = bytes(self._gw.get_outputs(i))
+                if out_total > 0 and out_data:
+                    self._pn.write_raw_outputs(i, out_data)
+                    # mirror first word pair into ds for the IO diagnostic view
+                    if len(out_data) >= 4:
+                        ds.stw1 = struct.unpack_from("<H", out_data, 0)[0]
+                        ds.nsoll = struct.unpack_from("<H", out_data, 2)[0]
 
-                # Profinet inputs → Gateway
-                if dc.input_length >= 4:
-                    zsw1, nist = self._pn.read_inputs(i)
-                    self._gw.set_zsw1_nist(i, zsw1, nist)
-                elif dc.input_length > 0:
-                    inp = self._pn.read_raw_inputs(i, dc.input_length)
+                # Profinet inputs → Gateway (concatenated rack frame)
+                if in_total > 0:
+                    inp = self._pn.read_raw_inputs(i, in_total)
                     self._gw.set_inputs(i, inp)
+                    if len(inp) >= 4:
+                        ds.zsw1 = struct.unpack_from("<H", inp, 0)[0]
+                        ds.nist = struct.unpack_from("<H", inp, 2)[0]
 
             time.sleep(0.01)
