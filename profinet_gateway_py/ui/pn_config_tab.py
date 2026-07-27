@@ -16,6 +16,7 @@ class CanvasDevice:
     cfg: DeviceConfig
     canvas_id: int = 0       # image item id on canvas
     label_id: int = 0        # text label item id
+    box_id: int = 0          # background box rectangle
     photo: object = None     # tk PhotoImage (keep reference)
 
 
@@ -114,9 +115,38 @@ class PnConfigTab(ttk.Frame):
         self._canvas.bind("<Double-Button-1>", self._canvas_dblclick)
         # Right-click to delete
         self._canvas.bind("<Button-3>", self._canvas_right_click)
+        self._canvas.bind("<Configure>", lambda e: self._draw_bus())
+
+        self._bus_y = 60
+        self._draw_bus()
 
         # Populate adapters
         self._refresh_adapters()
+
+    # ── netDevice-style Profinet bus ─────────────────────────────────────────
+    def _draw_bus(self):
+        """Green Profinet bus line with the PC controller at the left."""
+        c = self._canvas
+        c.delete("bus")
+        width = max(c.winfo_width(), 1180)
+        y = self._bus_y
+        # controller box
+        c.create_rectangle(16, y - 22, 96, y + 22, fill="#1a4e8c", outline="#12385f",
+                            tags="bus")
+        c.create_text(56, y, text="PC\nController", fill="white",
+                      font=("Arial", 8, "bold"), tags="bus")
+        # bus line
+        c.create_line(96, y, width - 20, y, fill="#2e7d32", width=3, tags="bus")
+        c.tag_lower("bus")
+        self._redraw_connectors()
+
+    def _redraw_connectors(self):
+        c = self._canvas
+        c.delete("conn")
+        for cd in self._canvas_devs:
+            x, y = cd.cfg.canvas_x, cd.cfg.canvas_y
+            c.create_line(x, self._bus_y, x, y - 34, fill="#2e7d32", width=2, tags="conn")
+        c.tag_lower("conn")
 
     def _label_for(self, name: str, desc: str) -> str:
         """Friendly dropdown label: 'Intel Ethernet — \\Device\\NPF_{GUID}'."""
@@ -209,6 +239,11 @@ class PnConfigTab(ttk.Frame):
 
     def _add_device_to_canvas(self, gsdml: GSDMLDevice, x: int, y: int,
                                existing_cfg: Optional[DeviceConfig] = None):
+        # keep devices below the Profinet bus so connectors read cleanly
+        y = max(y, self._bus_y + 90)
+        # netDevice-style box behind the device
+        box_id = self._canvas.create_rectangle(x-46, y-40, x+46, y+52,
+                                                fill="white", outline="#9aa7b4")
         photo = load_device_image(gsdml, size=(64, 64))
         if photo:
             img_id = self._canvas.create_image(x, y, image=photo, anchor="center")
@@ -233,20 +268,23 @@ class PnConfigTab(ttk.Frame):
         cfg.canvas_y = y
 
         cd = CanvasDevice(gsdml=gsdml, cfg=cfg,
-                          canvas_id=img_id, label_id=lbl_id, photo=photo)
+                          canvas_id=img_id, label_id=lbl_id, box_id=box_id, photo=photo)
         self._canvas_devs.append(cd)
 
         # Enable drag on canvas item
-        self._canvas.tag_bind(img_id, "<B1-Motion>", lambda e, c=cd: self._move_device(e, c))
-        self._canvas.tag_bind(lbl_id, "<B1-Motion>", lambda e, c=cd: self._move_device(e, c))
+        for it in (img_id, lbl_id, box_id):
+            self._canvas.tag_bind(it, "<B1-Motion>", lambda e, c=cd: self._move_device(e, c))
+        self._redraw_connectors()
 
     def _move_device(self, event, cd: CanvasDevice):
         x = self._canvas.canvasx(event.x)
-        y = self._canvas.canvasy(event.y)
+        y = max(self._canvas.canvasy(event.y), self._bus_y + 90)
         self._canvas.coords(cd.canvas_id, x, y)
         self._canvas.coords(cd.label_id, x, y + 40)
+        self._canvas.coords(cd.box_id, x-46, y-40, x+46, y+52)
         cd.cfg.canvas_x = int(x)
         cd.cfg.canvas_y = int(y)
+        self._redraw_connectors()
 
     def _canvas_dblclick(self, event):
         x = self._canvas.canvasx(event.x)
@@ -276,5 +314,7 @@ class PnConfigTab(ttk.Frame):
                                         parent=self):
                     self._canvas.delete(cd.canvas_id)
                     self._canvas.delete(cd.label_id)
+                    self._canvas.delete(cd.box_id)
                     self._canvas_devs.pop(i)
+                    self._redraw_connectors()
                 return
