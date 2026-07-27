@@ -201,7 +201,7 @@ class ProfinetCtrl:
             from profinet.cyclic import CyclicController
             from profinet.util import ethernet_socket, get_mac, s2mac
 
-            src = get_mac(self._adapter)
+            src = get_mac(self._macname(self._adapter))
             ds.src_mac = src
 
             # 1. DCP: assign name + IP if we have the device MAC
@@ -273,7 +273,7 @@ class ProfinetCtrl:
             from profinet.util import ethernet_socket, get_mac
             sock = ethernet_socket(adapter, 3)
             try:
-                src = get_mac(adapter)
+                src = get_mac(self._macname(adapter))
                 dcp.send_discover(sock, src)
                 resp = dcp.read_response(sock, src, timeout_sec=max(1, timeout_ms // 1000))
                 for mac, blocks in resp.items():
@@ -301,7 +301,7 @@ class ProfinetCtrl:
         from profinet.util import ethernet_socket, get_mac
         adapter = self.resolve_adapter(adapter)
         sock = ethernet_socket(adapter, 3)
-        return sock, get_mac(adapter)
+        return sock, get_mac(self._macname(adapter))
 
     def dcp_set_name(self, adapter: str, mac: str, name: str) -> bool:
         if not self._ok:
@@ -455,6 +455,18 @@ class ProfinetCtrl:
             if 0 <= idx < len(self._devices):
                 return self._devices[idx]
             return None
+
+    @staticmethod
+    def _macname(adapter: str) -> str:
+        """profinet-py's get_mac() cannot match a full '\\Device\\NPF_{GUID}'
+        path (it matches friendly name / description / bare {GUID}). Reduce an
+        NPF path to the bare {GUID} so get_mac succeeds; pass anything else
+        (Linux 'eth0', friendly names) through unchanged."""
+        if sys.platform == "win32":
+            m = _GUID_RE.search(adapter or "")
+            if m:
+                return "{" + m.group(0) + "}"
+        return adapter
 
     @staticmethod
     def mac_bytes_to_str(mac) -> str:
