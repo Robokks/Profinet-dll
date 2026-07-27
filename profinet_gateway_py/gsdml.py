@@ -28,11 +28,19 @@ except ImportError:
 
 # ── Dataclasses (identical shape to the DLL-version parser) ──────────────────
 @dataclass
+class DataItemInfo:
+    direction: str      # "INPUT" (device→ctrl) or "OUTPUT" (ctrl→device)
+    data_type: str      # e.g. "Unsigned16"
+    text: str           # resolved TextId, e.g. "Status word or actual value"
+
+
+@dataclass
 class SubmoduleInfo:
     ident: int
     name: str
     input_length: int   # bytes device→controller
     output_length: int  # bytes controller→device
+    data_items: List["DataItemInfo"] = field(default_factory=list)
 
 
 @dataclass
@@ -137,6 +145,33 @@ def _resolve_name(item, tmap: Dict[str, str]) -> str:
     return ""
 
 
+def _extract_submodule_items(root, tmap: Dict[str, str]) -> Dict[str, list]:
+    """Map each SubmoduleItem ID -> [DataItemInfo,...] from its IOData, so the
+    UI can show a SYCON.net-style per-word submodule details table."""
+    out: Dict[str, list] = {}
+    for tag in ("SubmoduleItem", "VirtualSubmoduleItem"):
+        for sub in _iter(root, tag):
+            sid = sub.get("ID")
+            if not sid:
+                continue
+            items = []
+            io = _first(sub, "IOData")
+            if io is not None:
+                for direction, block in (("INPUT", _first(io, "Input")),
+                                         ("OUTPUT", _first(io, "Output"))):
+                    if block is None:
+                        continue
+                    for di in _iter(block, "DataItem"):
+                        tid = di.get("TextId", "")
+                        items.append(DataItemInfo(
+                            direction=direction,
+                            data_type=di.get("DataType", ""),
+                            text=tmap.get(tid, tid) if tid else ""))
+            if items:
+                out[sid] = items
+    return out
+
+
 def _extract_names_and_identity(path: str):
     """Return (id2name, identity, bitmap) parsed straight from the XML.
 
@@ -148,12 +183,14 @@ def _extract_names_and_identity(path: str):
     vendor_name = device_name = ""
     vendor_id = device_id = 0
     bitmap: Optional[bytes] = None
+    sub_items: Dict[str, list] = {}
     try:
         root = ET.parse(path).getroot()
     except Exception:
-        return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap
+        return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap, sub_items
 
     tmap = _build_text_map(root)
+    sub_items = _extract_submodule_items(root, tmap)
 
     for tag in ("ModuleItem", "SubmoduleItem", "VirtualSubmoduleItem",
                 "DeviceAccessPointItem"):
@@ -208,7 +245,7 @@ def _extract_names_and_identity(path: str):
         if gfile:
             bitmap = _read_graphic_file(os.path.dirname(os.path.abspath(path)), gfile)
 
-    return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap
+    return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap, sub_items
 
 
 def _read_graphic_file(base_dir: str, gfile: str) -> Optional[bytes]:
@@ -244,7 +281,7 @@ def parse_gsdml(path: str) -> GSDMLDevice:
     """Parse a GSDML file into a GSDMLDevice, listing every telegram."""
     from profinet.gsdml import load_gsdml   # profinet-py (GPL-3.0)
 
-    id2name, (vendor_name, device_name, vendor_id, device_id), bitmap = \
+    id2name, (vendor_name, device_name, vendor_id, device_id), bitmap, sub_items = \
         _extract_names_and_identity(path)
 
     dev = load_gsdml(path)
@@ -261,6 +298,7 @@ def parse_gsdml(path: str) -> GSDMLDevice:
             name=id2name.get(sub.id, sub.id),
             input_length=sub.input_length,
             output_length=sub.output_length,
+            data_items=list(sub_items.get(sub.id, [])),
         )
 
     modules: List[ModuleInfo] = []
