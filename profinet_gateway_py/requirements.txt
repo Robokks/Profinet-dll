@@ -1,0 +1,5 @@
+# Profinet Gateway (profinet-py backend)
+profinet-py>=0.6.2
+construct>=2.10
+# Pillow is optional — used for GSDML device bitmaps on the canvas
+Pillow
