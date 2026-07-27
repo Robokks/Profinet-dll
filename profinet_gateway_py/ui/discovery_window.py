@@ -33,13 +33,24 @@ class DiscoveryWindow(tk.Toplevel):
         hdr.pack(fill="x"); hdr.pack_propagate(False)
         tk.Label(hdr, text="NETWORK DISCOVERY", bg="#00838f", fg="white",
                  font=("Arial", 13, "bold")).pack(side="left", padx=12, pady=8)
-        tk.Label(hdr, text=f"adapter: {self._adapter}", bg="#00838f",
-                 fg="#c8f0f4", font=("Arial", 8)).pack(side="right", padx=12)
+
+        # Adapter selection row
+        arow = ttk.Frame(self); arow.pack(fill="x", padx=10, pady=(8, 2))
+        ttk.Label(arow, text="Adapter:").pack(side="left")
+        self._adapter_names = []
+        self._adapter_display = tk.StringVar()
+        self._adapter_combo = ttk.Combobox(arow, textvariable=self._adapter_display,
+                                            state="readonly", width=58)
+        self._adapter_combo.pack(side="left", padx=4)
+        self._adapter_combo.bind("<<ComboboxSelected>>", self._on_adapter_select)
+        ttk.Button(arow, text="Refresh", command=self._refresh_adapters).pack(side="left", padx=4)
 
         top = ttk.Frame(self); top.pack(fill="x", padx=10, pady=6)
         ttk.Button(top, text="Scan Network", command=self._on_scan).pack(side="left")
         self._status = tk.StringVar(value="Ready.")
         ttk.Label(top, textvariable=self._status, foreground="gray").pack(side="left", padx=12)
+
+        self._refresh_adapters()
 
         # Device table
         cols = ("name", "ip", "mac", "vendor", "device")
@@ -79,6 +90,28 @@ class DiscoveryWindow(tk.Toplevel):
         self._mac_var = tk.StringVar()
         ttk.Label(panel, textvariable=self._mac_var, foreground="blue").grid(
             row=3, column=3, sticky="w", **pad)
+
+    # ── adapter dropdown ────────────────────────────────────────────────────
+    def _refresh_adapters(self):
+        verbose = self._pn.enumerate_adapters_verbose()
+        self._adapter_names = [n for (n, _d) in verbose]
+        labels = [f"{d}   —   {n}" for (n, d) in verbose]
+        self._adapter_combo["values"] = labels
+        if not self._adapter_names:
+            self._status.set("No adapters found — is Npcap installed?")
+            return
+        # prefer the configured adapter, else the first
+        want = self._pn.resolve_adapter(self._adapter) if self._adapter else ""
+        idx = self._adapter_names.index(want) if want in self._adapter_names else 0
+        self._adapter = self._adapter_names[idx]
+        self._adapter_combo.current(idx)
+        self._adapter_display.set(labels[idx])
+
+    def _on_adapter_select(self, _e=None):
+        idx = self._adapter_combo.current()
+        if 0 <= idx < len(self._adapter_names):
+            self._adapter = self._adapter_names[idx]
+            self._status.set(f"Adapter: {self._adapter}")
 
     # ── selection ───────────────────────────────────────────────────────────
     def _selected(self):
