@@ -46,6 +46,10 @@ FID_DCP_SET       = 0xFEFD
 FID_DCP_SET_R     = 0xFEFC
 RPC_PORT          = 34964
 
+# RPC wire layout (must match src/rpc_cm.c): 24-byte header, ObjUUID at 24,
+# stub payload at 40. ControlCommand lives at payload+20.
+RPC_OFF_PAYLOAD   = 40
+
 # Profinet IO object UUID: DEA00001-6C97-11D1-8271-00A02442DF7D (wire order)
 PN_OBJ_UUID = bytes([
     0x00, 0x00, 0xa0, 0xde, 0x97, 0x6c, 0xd1, 0x11,
@@ -402,7 +406,7 @@ class VfdSim:
         return 24
 
     def _rpc_connect(self, buf, n, frm):
-        payload = buf[56:]
+        payload = buf[RPC_OFF_PAYLOAD:]
         plen = len(payload)
         if plen < 4: return
         self.ar_uuid = bytes(16); self.session_key = 0
@@ -416,18 +420,23 @@ class VfdSim:
             blk_len = u16be(payload, pos + 2)
             if blk_len == 0: break
             ds = pos + 4
-            be = ds + blk_len
+            # This master's BlockLength counts the body AFTER the 2 version
+            # bytes, so the whole block spans type(2)+len(2)+version(2)+body
+            # = 6 + blk_len, not 4 + blk_len.
+            be = pos + 6 + blk_len
             if be > plen: break
             if blk_type == 0x0101 and blk_len >= 28:
                 self.ar_uuid = bytes(payload[ds+4:ds+20])
                 self.session_key = u16be(payload, ds+20)
                 self.ctrl_mac = bytes(payload[ds+22:ds+28])
-            elif blk_type == 0x0102 and blk_len >= 14:
+            elif blk_type == 0x0102 and blk_len >= 16:
+                # IOCRBlockReq body: ver(2) IOCRType(2) IOCRRef(2) LT(2)
+                #   Properties(4) DataLength(2) FrameID(2) SendClock(2) ...
                 iocr_type = u16be(payload, ds+2)
                 iocr_ref  = u16be(payload, ds+4)
-                data_len  = u16be(payload, ds+8)
-                frame_id  = u16be(payload, ds+10)
-                clock_f   = u16be(payload, ds+12) if blk_len >= 14 else 128
+                data_len  = u16be(payload, ds+12)
+                frame_id  = u16be(payload, ds+14)
+                clock_f   = u16be(payload, ds+16)
                 if iocr_type == 1:
                     self.output_frame_id = frame_id
                     self.iocr_ref_out = iocr_ref
@@ -436,8 +445,7 @@ class VfdSim:
                 elif iocr_type == 2:
                     self.input_frame_id = frame_id
                     self.iocr_ref_in = iocr_ref
-            pos = be
-            if be & 1: pos += 1
+            pos = be   # master packs blocks contiguously (no even padding)
 
         self.log(f"RPC Connect: ctrl_mac={':'.join('%02X' % b for b in self.ctrl_mac)}")
         self.log(f"  OutputFrameID=0x{self.output_frame_id:04X} "
@@ -514,9 +522,11 @@ class VfdSim:
         self.rpc_sock.sendto(bytes(r[:rp]), frm)
 
     def _rpc_dcontrol(self, buf, n, frm):
-        if n < 82: return
-        payload = buf[56:]
-        cmd = u16be(payload, 24)
+        # Master DControl is 64 bytes: payload@40, ControlCommand@payload+20
+        if n < RPC_OFF_PAYLOAD + 22:
+            return
+        payload = buf[RPC_OFF_PAYLOAD:]
+        cmd = u16be(payload, 20)
 
         if cmd & 0x0004:      # ApplicationReady
             self.state = DEV_CYCLIC
@@ -542,22 +552,21 @@ class VfdSim:
         self.rpc_sock.sendto(bytes(r[:rp]), frm)
 
         if cmd & 0x0004:      # send CControl request back to controller
+            # Mirror the master's DControl layout exactly: 24-byte header
+            # (opnum=CCONTROL, ptype=REQUEST), ObjUUID space at 24, payload at
+            # 40 with ControlCommand at payload+20 (absolute 60).
             self._ccid = (self._ccid + 1) & 0xFFFFFFFF
-            cc = bytearray(256)
-            cp = self._rpc_hdr(cc, struct.pack("<I", self._ccid), 3, 0)
-            cc[cp:cp+16] = PN_OBJ_UUID; cp += 16
-            put_u16be(cc, cp, 0x0110); cp += 2
-            put_u16be(cc, cp, 28); cp += 2
-            cc[cp] = 0x01; cc[cp+1] = 0x00; cp += 2
-            cc[cp] = 0x00; cc[cp+1] = 0x00; cp += 2
-            cc[cp:cp+16] = self.ar_uuid; cp += 16
-            put_u16be(cc, cp, self.session_key); cp += 2
-            cc[cp] = 0x00; cc[cp+1] = 0x00; cp += 2
-            put_u16be(cc, cp, 0x0004); cp += 2
-            put_u16be(cc, cp, 0x0000); cp += 2
-            cc[8] = cp & 0xFF; cc[9] = (cp >> 8) & 0xFF
+            cc = bytearray(RPC_OFF_PAYLOAD + 24)
+            self._rpc_hdr(cc, struct.pack("<I", self._ccid), 3, 0)
+            cp = RPC_OFF_PAYLOAD
+            cc[cp:cp+16] = self.ar_uuid; cp += 16          # payload+0
+            put_u16be(cc, cp, self.session_key); cp += 2    # payload+16
+            put_u16be(cc, cp, 0x0000); cp += 2              # payload+18
+            put_u16be(cc, cp, 0x0004); cp += 2              # payload+20 = AppReady
+            put_u16be(cc, cp, 0x0000); cp += 2              # payload+22
+            cc[8] = cp & 0xFF; cc[9] = (cp >> 8) & 0xFF     # frag_length
             self.rpc_sock.sendto(bytes(cc[:cp]), self.ctrl_addr)
-            self.log("CControl sent to controller — AR established")
+            self.log("CControl(ApplicationReady) sent to controller")
 
     def _rpc_release(self, buf, frm):
         self._stop_cyclic()
