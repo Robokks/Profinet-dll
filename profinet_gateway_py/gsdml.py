@@ -98,12 +98,18 @@ def _to_int(s: str, default: int = 0) -> int:
 
 
 def _build_text_map(root) -> Dict[str, str]:
-    """TextId -> human text, from every <Text TextId=.. Value=../>."""
+    """TextId -> human text. A GSDML ExternalTextList has a <PrimaryLanguage>
+    (English) plus <Language xml:lang=..> translations that reuse the same
+    TextIds. Read only PrimaryLanguage so names resolve in English — a plain
+    last-wins over every <Text> would otherwise pick the last language block
+    (e.g. Chinese)."""
     tmap: Dict[str, str] = {}
-    for t in _iter(root, "Text"):
+    prim = _first(root, "PrimaryLanguage")
+    scope = prim if prim is not None else root
+    for t in _iter(scope, "Text"):
         tid = t.get("TextId")
         val = t.get("Value")
-        if tid and val is not None:
+        if tid and val is not None and tid not in tmap:
             tmap[tid] = val
     return tmap
 
