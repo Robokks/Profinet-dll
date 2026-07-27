@@ -101,6 +101,11 @@ class _DeviceCard(ttk.LabelFrame):
         stats_btn = ttk.Button(top, text="Stats", command=self._show_stats)
         stats_btn.pack(side="right", padx=4)
 
+        # Active telegram(s) — reflects the current configuration
+        self._tel_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self._tel_var, foreground="#5e35b1",
+                  font=("Arial", 8)).pack(side="left", padx=14)
+
         ttk.Separator(self, orient="horizontal").grid(
             row=1, column=0, columnspan=4, sticky="ew", padx=6)
 
@@ -165,6 +170,10 @@ class _DeviceCard(ttk.LabelFrame):
 
         ds = self._pn.device_state(self._idx)
         if ds:
+            # keep header + telegram info in sync with the live config
+            dc = ds.config
+            self.configure(text=f"  {dc.station_name or f'Device {self._idx}'}  ({dc.ip})")
+            self._tel_var.set(self._telegram_text(dc))
             self._stw1_var.set(f"0x{ds.stw1:04X}")
             self._nsoll_var.set(f"0x{ds.nsoll:04X}")
             self._zsw1_var.set(f"0x{ds.zsw1:04X}")
@@ -172,6 +181,17 @@ class _DeviceCard(ttk.LabelFrame):
             self._zsw1_bits.set(_decode_zsw1(ds.zsw1))
             pct = round(ds.nist * 100 / 0x4000) if ds.nist else 0
             self._nist_pct.set(f"{pct}%")
+
+    @staticmethod
+    def _telegram_text(dc) -> str:
+        dos = dc.effective_drive_objects()
+        parts = []
+        for d in dos:
+            tel = d.submodule_name or "(no telegram)"
+            mod = f"{d.module_name} / " if d.module_name else ""
+            parts.append(f"{mod}{tel} [{d.input_length}/{d.output_length} B]")
+        total = f"   Σ in {dc.total_input_length()} / out {dc.total_output_length()} B"
+        return "Telegram:  " + "   +   ".join(parts) + (total if len(dos) > 1 else "")
 
     def _force(self):
         try:
