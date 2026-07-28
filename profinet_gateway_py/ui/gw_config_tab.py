@@ -35,6 +35,8 @@ class GwConfigTab(ttk.Frame):
                          value="TCP").pack(side="left", padx=4)
         ttk.Radiobutton(proto_frame, text="UDP", variable=self._proto_var,
                          value="UDP").pack(side="left", padx=4)
+        ttk.Radiobutton(proto_frame, text="STM (LabVIEW stream)",
+                         variable=self._proto_var, value="STM").pack(side="left", padx=4)
 
         # Port
         ttk.Label(frame, text="Port:").grid(row=1, column=0, sticky="w", **pad)
@@ -56,8 +58,15 @@ class GwConfigTab(ttk.Frame):
             "input_length bytes (EXE→client) in config order.\n\n"
             "Example — 2 devices, Telegram 1 (4B each):\n"
             "  TX frame (client→EXE): [Dev0: STW1 2B, NSOLL 2B][Dev1: STW1 2B, NSOLL 2B] = 8B\n"
-            "  RX frame (EXE→client): [Dev0: ZSW1 2B, NIST  2B][Dev1: ZSW1 2B, NIST  2B] = 8B\n\n"
-            "Values are little-endian 16-bit words."
+            "  RX frame (EXE→client): [Dev0: ZSW1 2B, NIST  2B][Dev1: ZSW1 2B, NIST  2B] = 8B\n"
+            "Values are BIG-ENDIAN 16-bit words (Profinet wire order).\n\n"
+            "Protocols:\n"
+            "  TCP — request/response: client sends output frame, gets input frame.\n"
+            "  UDP — datagram: send output frame, receive input frame.\n"
+            "  STM — LabVIEW streaming: each message is [4-byte BE length][frame],\n"
+            "        full-duplex (EXE streams inputs continuously; client streams\n"
+            "        outputs). Read/Write with the NI STM library or plain TCP\n"
+            "        Read (4-byte length, then that many bytes)."
         ), justify="left", foreground="gray").pack(padx=10, pady=8, anchor="w")
 
     def _load_values(self):

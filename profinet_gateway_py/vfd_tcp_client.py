@@ -182,7 +182,7 @@ class VfdTcpClient(tk.Tk):
         self._port_var = tk.StringVar(value="5000")
         ttk.Entry(conn, textvariable=self._port_var, width=6).pack(side="left", padx=4)
         self._proto_var = tk.StringVar(value="TCP")
-        ttk.Combobox(conn, textvariable=self._proto_var, values=("TCP", "UDP"),
+        ttk.Combobox(conn, textvariable=self._proto_var, values=("TCP", "UDP", "STM"),
                      state="readonly", width=5).pack(side="left", padx=4)
         ttk.Label(conn, text="Devices:").pack(side="left", padx=(8, 0))
         self._ndev_var = tk.IntVar(value=1)
@@ -249,7 +249,7 @@ class VfdTcpClient(tk.Tk):
             self._status_var.set("● Bad port"); return
         proto = self._proto_var.get()
         try:
-            if proto == "TCP":
+            if proto in ("TCP", "STM"):
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(3.0)
                 s.connect((host, port))
@@ -294,7 +294,17 @@ class VfdTcpClient(tk.Tk):
                 frame = b"".join(
                     struct.pack(">HH", p.stw1 & 0xFFFF, p.nsoll & 0xFFFF).ljust(out_b, b"\x00")
                     for p in self._panels)
-                if proto == "TCP":
+                if proto == "STM":
+                    # [4B BE length][frame] both directions
+                    sock.sendall(struct.pack(">I", len(frame)) + frame)
+                    hdr = self._recv_exact(sock, 4)
+                    if hdr is None:
+                        break
+                    ln = struct.unpack(">I", hdr)[0]
+                    data = self._recv_exact(sock, ln)
+                    if data is None:
+                        break
+                elif proto == "TCP":
                     sock.sendall(frame)
                     data = self._recv_exact(sock, inp_size)
                     if data is None:

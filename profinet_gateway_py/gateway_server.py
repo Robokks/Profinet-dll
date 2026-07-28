@@ -101,10 +101,12 @@ class GatewayServer:
         if self._running:
             return
         self._running = True
-        if self._protocol == "TCP":
-            self._thread = threading.Thread(target=self._tcp_server, daemon=True)
-        else:
+        if self._protocol == "UDP":
             self._thread = threading.Thread(target=self._udp_server, daemon=True)
+        elif self._protocol == "STM":
+            self._thread = threading.Thread(target=self._stm_server, daemon=True)
+        else:
+            self._thread = threading.Thread(target=self._tcp_server, daemon=True)
         self._thread.start()
         self._log(f"[GW] {self._protocol} server listening on {self._bind}:{self._port}")
 
@@ -217,6 +219,99 @@ class GatewayServer:
                 if waited >= deadline_s:
                     return b""   # partial-frame stall — resync next loop
         return buf
+
+    # ── STM server (LabVIEW streaming: [4B BE length][frame], full-duplex) ──
+    def _stm_server(self):
+        try:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._sock.settimeout(1.0)
+            self._sock.bind((self._bind, self._port))
+            self._sock.listen(1)
+        except OSError as e:
+            self._log(f"[GW] STM bind error: {e}")
+            self._running = False
+            return
+
+        while self._running:
+            try:
+                conn, addr = self._sock.accept()
+                self._client_conn = conn
+                self._client_addr = addr
+                self._log(f"[GW] STM client connected: {addr}")
+                self._handle_stm_client(conn)
+                self._client_conn = None
+                self._log(f"[GW] STM client disconnected: {addr}")
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+    def _handle_stm_client(self, conn: socket.socket):
+        conn.settimeout(0.2)
+        in_size = sum(dc.total_input_length() for dc in self._device_configs)
+        tx_stop = threading.Event()
+
+        # TX: stream the input frame (device→controller) continuously (~50 Hz)
+        def tx_loop():
+            while self._running and not tx_stop.is_set():
+                if in_size > 0:
+                    with self._lock:
+                        frame = b"".join(bytes(self._io[i]["inp"])
+                                         for i in range(len(self._device_configs)))
+                    try:
+                        conn.sendall(struct.pack(">I", len(frame)) + frame)
+                    except OSError:
+                        break
+                time.sleep(0.02)
+
+        tx = threading.Thread(target=tx_loop, daemon=True, name="stm-tx")
+        tx.start()
+
+        # RX: read framed output messages (controller→device) as they arrive
+        try:
+            while self._running:
+                hdr = self._recv_all(conn, 4)
+                if hdr is None:
+                    break
+                n = struct.unpack(">I", hdr)[0]
+                if n == 0 or n > 1_000_000:
+                    continue
+                payload = self._recv_all(conn, n)
+                if payload is None:
+                    break
+                offset = 0
+                with self._lock:
+                    for i, dc in enumerate(self._device_configs):
+                        m = dc.total_output_length()
+                        if offset + m <= len(payload):
+                            self._io[i]["out"][:m] = payload[offset:offset + m]
+                        offset += m
+        except OSError:
+            pass
+        finally:
+            tx_stop.set()
+            tx.join(timeout=1.0)
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _recv_all(self, conn: socket.socket, n: int):
+        """Block until exactly n bytes are read (retrying on timeout while the
+        server runs). Returns None on clean disconnect or error."""
+        buf = b""
+        while len(buf) < n and self._running:
+            try:
+                chunk = conn.recv(n - len(buf))
+                if not chunk:
+                    return None
+                buf += chunk
+            except socket.timeout:
+                continue
+            except OSError:
+                return None
+        return buf if len(buf) == n else None
 
     # ── UDP server ──────────────────────────────────────────────────────────
     def _udp_server(self):
