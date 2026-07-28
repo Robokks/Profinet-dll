@@ -64,6 +64,12 @@ class GatewayServer:
                 return bytearray(self._io[idx]["out"])
             return bytearray()
 
+    def get_inputs(self, idx: int) -> bytearray:
+        with self._lock:
+            if idx < len(self._io):
+                return bytearray(self._io[idx]["inp"])
+            return bytearray()
+
     def set_inputs(self, idx: int, data: bytes):
         with self._lock:
             if idx < len(self._io):

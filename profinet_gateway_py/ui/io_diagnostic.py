@@ -64,11 +64,23 @@ class IODiagnosticWindow(tk.Toplevel):
             card.pack(fill="x", padx=10, pady=6)
             self._cards.append(card)
 
+    def _config_signature(self):
+        """Device count + per-device (in,out) totals — changes when a telegram
+        is (re)selected, so we know when to rebuild the cards."""
+        sig = []
+        for i in range(self._pn.device_count()):
+            ds = self._pn.device_state(i)
+            if ds:
+                sig.append((ds.config.total_input_length(),
+                            ds.config.total_output_length()))
+        return tuple(sig)
+
     def _refresh(self):
         if not self.winfo_exists():
             return
-        # Re-populate if device count changed
-        if len(self._cards) != self._pn.device_count():
+        sig = self._config_signature()
+        if sig != getattr(self, "_sig", None):
+            self._sig = sig
             self._populate_cards()
         for card in self._cards:
             card.refresh()
@@ -157,6 +169,43 @@ class _DeviceCard(ttk.LabelFrame):
         ttk.Label(self, textvariable=self._nist_pct, foreground="gray").grid(
             row=8, column=2, **pad)
 
+        # ── Raw process data — full telegram words (shown when > 1 word) ──
+        self._out_word_vars = []
+        self._in_word_vars = []
+        dc = self._ds.config
+        out_words = dc.total_output_length() // 2
+        in_words = dc.total_input_length() // 2
+        if out_words > 1 or in_words > 1:
+            raw = ttk.LabelFrame(self, text="Raw process data  (words, hex — big-endian)")
+            raw.grid(row=9, column=0, columnspan=4, sticky="ew", padx=6, pady=4)
+            ttk.Label(raw, text="OUT:", foreground="#1a4e8c").grid(row=0, column=0, sticky="w", padx=2)
+            for w in range(out_words):
+                v = tk.StringVar(value="0000")
+                ttk.Entry(raw, textvariable=v, width=6).grid(
+                    row=1 + w // 8, column=(w % 8) + 1, padx=1, pady=1)
+                self._out_word_vars.append(v)
+            ttk.Button(raw, text="Write OUT", command=self._write_words).grid(
+                row=0, column=9, padx=4)
+            base = 1 + (max(out_words, 1) + 7) // 8
+            ttk.Label(raw, text="IN:", foreground="#1a6b1a").grid(row=base, column=0, sticky="w", padx=2)
+            for w in range(in_words):
+                v = tk.StringVar(value="0000")
+                ttk.Label(raw, textvariable=v, width=6, relief="sunken",
+                          foreground="green", anchor="center").grid(
+                    row=base + 1 + w // 8, column=(w % 8) + 1, padx=1, pady=1)
+                self._in_word_vars.append(v)
+
+    def _write_words(self):
+        import struct
+        data = b""
+        for v in self._out_word_vars:
+            try:
+                word = int(v.get() or "0", 16) & 0xFFFF
+            except ValueError:
+                word = 0
+            data += struct.pack(">H", word)
+        self._gw.set_outputs(self._idx, data)
+
     def refresh(self):
         connected = self._pn.is_connected(self._idx)
         if connected:
@@ -181,6 +230,13 @@ class _DeviceCard(ttk.LabelFrame):
             self._zsw1_bits.set(_decode_zsw1(ds.zsw1))
             pct = round(ds.nist * 100 / 0x4000) if ds.nist else 0
             self._nist_pct.set(f"{pct}%")
+            # live raw input words (device → controller), from the gateway buffer
+            if self._in_word_vars:
+                inp = self._gw.get_inputs(self._idx)
+                for w, v in enumerate(self._in_word_vars):
+                    off = w * 2
+                    if off + 2 <= len(inp):
+                        v.set(f"{(inp[off] << 8) | inp[off + 1]:04X}")
 
     @staticmethod
     def _telegram_text(dc) -> str:
