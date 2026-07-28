@@ -47,16 +47,17 @@ class Bridge:
                 if out_total > 0 and out_data:
                     self._pn.write_raw_outputs(i, out_data)
                     # mirror first word pair into ds for the IO diagnostic view
+                    # (big-endian — matches the Profinet wire order end-to-end)
                     if len(out_data) >= 4:
-                        ds.stw1 = struct.unpack_from("<H", out_data, 0)[0]
-                        ds.nsoll = struct.unpack_from("<H", out_data, 2)[0]
+                        ds.stw1 = struct.unpack_from(">H", out_data, 0)[0]
+                        ds.nsoll = struct.unpack_from(">H", out_data, 2)[0]
 
                 # Profinet inputs → Gateway (concatenated rack frame)
                 if in_total > 0:
                     inp = self._pn.read_raw_inputs(i, in_total)
                     self._gw.set_inputs(i, inp)
                     if len(inp) >= 4:
-                        ds.zsw1 = struct.unpack_from("<H", inp, 0)[0]
-                        ds.nist = struct.unpack_from("<H", inp, 2)[0]
+                        ds.zsw1 = struct.unpack_from(">H", inp, 0)[0]
+                        ds.nist = struct.unpack_from(">H", inp, 2)[0]
 
             time.sleep(0.01)

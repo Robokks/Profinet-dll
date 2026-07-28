@@ -2,6 +2,7 @@
 
 import sys
 import os
+import threading
 
 # Make sure our package root is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -15,23 +16,23 @@ from ui.main_window import MainWindow
 
 def start_services(cfg: AppConfig, pn: ProfinetCtrl,
                    gw: GatewayServer, br: Bridge, log):
-    """Initialize and start all background services."""
-    # Start Profinet controller
-    if cfg.devices:
-        ok = pn.start(cfg.adapter, cfg.devices)
-        if not ok:
-            log("[APP] Warning: some Profinet devices failed to initialize")
-        # Connect each device
-        for i in range(len(cfg.devices)):
-            pn.configure_device(i)
-
-    # Configure and start gateway
+    """Initialize and start all background services. The blocking Profinet
+    connect (DCP + RPC AR, multi-second timeouts per device) runs on a worker
+    thread so the GUI / Apply & Restart never freezes."""
+    # Gateway + bridge start immediately (non-blocking).
     gw.configure(cfg.gateway.protocol, cfg.gateway.port,
                  cfg.gateway.bind, cfg.devices)
     gw.start()
-
-    # Start bridge
     br.start()
+
+    if cfg.devices:
+        pn.start(cfg.adapter, cfg.devices)   # fast: just creates device state
+
+        def _connect_all():
+            for i in range(len(cfg.devices)):
+                pn.configure_device(i)        # slow: DCP + RPC AR per device
+        threading.Thread(target=_connect_all, daemon=True,
+                         name="pn-connect").start()
 
 
 def main():

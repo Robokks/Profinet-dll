@@ -73,14 +73,23 @@ class GatewayServer:
     def get_stw1_nsoll(self, idx: int):
         out = self.get_outputs(idx)
         if len(out) >= 4:
-            stw1  = struct.unpack_from("<H", out, 0)[0]
-            nsoll = struct.unpack_from("<H", out, 2)[0]
+            stw1  = struct.unpack_from(">H", out, 0)[0]
+            nsoll = struct.unpack_from(">H", out, 2)[0]
             return stw1, nsoll
         return 0, 0
 
     def set_zsw1_nist(self, idx: int, zsw1: int, nist: int):
-        data = struct.pack("<HH", zsw1, nist)
+        data = struct.pack(">HH", zsw1, nist)
         self.set_inputs(idx, data)
+
+    def set_outputs(self, idx: int, data: bytes):
+        """Overwrite (the head of) a device's output buffer — used by Force so
+        the bridge propagates and holds the value on the wire."""
+        with self._lock:
+            if idx < len(self._io):
+                buf = self._io[idx]["out"]
+                n = min(len(data), len(buf))
+                buf[:n] = data[:n]
 
     def start(self):
         if self._running:
@@ -150,13 +159,13 @@ class GatewayServer:
                     data = self._recv_exact(conn, out_size)
                     if data is None:
                         break
-                    # Distribute to per-device output buffers
-                    offset = 0
-                    with self._lock:
-                        for i, dc in enumerate(self._device_configs):
-                            n = dc.total_output_length()
-                            self._io[i]["out"][:n] = data[offset:offset + n]
-                            offset += n
+                    if data:   # full frame (b'' = partial stall → skip this cycle)
+                        offset = 0
+                        with self._lock:
+                            for i, dc in enumerate(self._device_configs):
+                                n = dc.total_output_length()
+                                self._io[i]["out"][:n] = data[offset:offset + n]
+                                offset += n
                 except socket.timeout:
                     pass
                 except OSError:
@@ -172,24 +181,35 @@ class GatewayServer:
                 except OSError:
                     break
 
+            # input-only config: no recv above, so pace to avoid a CPU spin
+            if out_size == 0:
+                time.sleep(0.02)
+
         try:
             conn.close()
         except Exception:
             pass
 
     @staticmethod
-    def _recv_exact(conn: socket.socket, n: int) -> Optional[bytes]:
+    def _recv_exact(conn: socket.socket, n: int, deadline_s: float = 2.0):
+        """Receive exactly n bytes. Returns None on disconnect, or b'' if a
+        partial frame stalls past the deadline (so a client that sends the
+        wrong frame size can't wedge the server thread forever)."""
         buf = b""
+        waited = 0.0
         while len(buf) < n:
             try:
                 chunk = conn.recv(n - len(buf))
                 if not chunk:
                     return None
                 buf += chunk
+                waited = 0.0
             except socket.timeout:
-                if buf:
-                    continue
-                return None
+                if not buf:
+                    return None
+                waited += 0.1
+                if waited >= deadline_s:
+                    return b""   # partial-frame stall — resync next loop
         return buf
 
     # ── UDP server ──────────────────────────────────────────────────────────

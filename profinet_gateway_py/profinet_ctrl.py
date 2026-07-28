@@ -202,6 +202,7 @@ class ProfinetCtrl:
             self._log(f"[PN] Device at {dc.ip}: no station name set — open "
                       f"Configuration, set the station name, Apply & Restart.")
             return False
+        conn = ctrl = None
         try:
             from profinet import dcp, rpc
             from profinet.rt import build_iocr_configs
@@ -272,6 +273,17 @@ class ProfinetCtrl:
             ds.connected = False
             ds.error = str(e)
             self._log(f"[PN] Connect failed for {getattr(dc, 'station_name', '?')}: {e}")
+            # clean up any half-open resources so a failed reconnect doesn't leak
+            try:
+                if ctrl is not None:
+                    ctrl.stop()
+            except Exception:
+                pass
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
             return False
 
     def dcp_discover(self, adapter: str, timeout_ms: int = 2000) -> List[ScanResult]:
@@ -396,7 +408,7 @@ class ProfinetCtrl:
                 ds.cyclic.set_output_data(slot, subslot, chunk)
                 off += out_len
         except Exception as e:
-            self._log(f"[PN] write_raw_outputs error: {e}")
+            pass  # hot loop — do not spam the log (state shown via get_stats)
 
     def read_inputs(self, idx: int):
         ds = self._get(idx)
@@ -427,7 +439,7 @@ class ProfinetCtrl:
                 out += bytes(data[:in_len]).ljust(in_len, b"\x00")
             return bytes(out[:length]).ljust(length, b"\x00")
         except Exception as e:
-            self._log(f"[PN] read_raw_inputs error: {e}")
+            pass  # hot loop — do not spam the log
         return bytes(length)
 
     # ── queries ─────────────────────────────────────────────────────────────

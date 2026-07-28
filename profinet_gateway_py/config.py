@@ -2,7 +2,7 @@
 
 import json
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from typing import List
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -85,26 +85,44 @@ class AppConfig:
     devices: List[DeviceConfig] = field(default_factory=list)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
 
+def _known(cls, d: dict) -> dict:
+    """Keep only keys that are real fields of the dataclass, so a config.json
+    written by a newer build (extra keys) doesn't raise TypeError."""
+    valid = {f.name for f in fields(cls)}
+    return {k: v for k, v in d.items() if k in valid}
+
+
 def load_config() -> AppConfig:
     if not os.path.exists(CONFIG_FILE):
         return AppConfig()
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        cfg = AppConfig()
-        cfg.adapter = data.get("adapter", "")
-        cfg.gateway = GatewayConfig(**data.get("gateway", {}))
-        devices = []
-        for d in data.get("devices", []):
+    except Exception as e:
+        print(f"[CFG] config.json unreadable ({e}); using defaults")
+        return AppConfig()
+
+    cfg = AppConfig()
+    cfg.adapter = data.get("adapter", "")
+    try:
+        cfg.gateway = GatewayConfig(**_known(GatewayConfig, data.get("gateway", {})))
+    except Exception:
+        cfg.gateway = GatewayConfig()
+
+    devices = []
+    for d in data.get("devices", []):
+        try:
             d = dict(d)
-            dos = [DriveObject(**x) for x in d.pop("drive_objects", [])]
-            dc = DeviceConfig(**d)
+            dos = [DriveObject(**_known(DriveObject, x))
+                   for x in d.pop("drive_objects", [])]
+            dc = DeviceConfig(**_known(DeviceConfig, d))
             dc.drive_objects = dos
             devices.append(dc)
-        cfg.devices = devices
-        return cfg
-    except Exception:
-        return AppConfig()
+        except Exception as e:
+            print(f"[CFG] skipping malformed device entry: {e}")
+    cfg.devices = devices
+    return cfg
+
 
 def save_config(cfg: AppConfig):
     data = {
@@ -112,5 +130,8 @@ def save_config(cfg: AppConfig):
         "gateway": asdict(cfg.gateway),
         "devices": [asdict(d) for d in cfg.devices],
     }
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    # atomic write: temp file + replace, so a crash mid-write can't corrupt it
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, CONFIG_FILE)

@@ -188,6 +188,17 @@ class VfdTcpClient(tk.Tk):
         self._ndev_var = tk.IntVar(value=1)
         ttk.Spinbox(conn, from_=1, to=8, width=4, textvariable=self._ndev_var,
                     command=self._rebuild_panels).pack(side="left", padx=4)
+        # bytes/device — must match the gateway's telegram (e.g. Tel1=4, Tel111=24,
+        # Free PZD-32/32=64). Only the first word pair (STW1/NSOLL, ZSW1/NIST) is
+        # driven from the GUI; the rest is zero-padded / ignored.
+        ttk.Label(conn, text="Out B:").pack(side="left", padx=(8, 0))
+        self._outb_var = tk.IntVar(value=4)
+        ttk.Spinbox(conn, from_=4, to=512, increment=2, width=5,
+                    textvariable=self._outb_var).pack(side="left", padx=2)
+        ttk.Label(conn, text="In B:").pack(side="left")
+        self._inb_var = tk.IntVar(value=4)
+        ttk.Spinbox(conn, from_=4, to=512, increment=2, width=5,
+                    textvariable=self._inb_var).pack(side="left", padx=2)
         self._conn_btn = ttk.Button(conn, text="Connect", command=self._toggle)
         self._conn_btn.pack(side="left", padx=8)
 
@@ -270,14 +281,19 @@ class VfdTcpClient(tk.Tk):
 
     def _poll_loop(self, proto):
         n = len(self._panels)
-        out_size = n * 4
-        inp_size = n * 4
+        # per-device output/input byte counts must match the gateway's telegram
+        out_b = max(4, int(self._outb_var.get()))
+        in_b = max(4, int(self._inb_var.get()))
+        out_size = n * out_b
+        inp_size = n * in_b
         sock = self._sock
         while self._connected and sock is not None:
             try:
-                # build output frame from panel state
-                frame = b"".join(struct.pack("<HH", p.stw1 & 0xFFFF, p.nsoll & 0xFFFF)
-                                 for p in self._panels)
+                # STW1/NSOLL big-endian (Profinet wire order) in the first
+                # word pair; rest of each device's slot zero-padded.
+                frame = b"".join(
+                    struct.pack(">HH", p.stw1 & 0xFFFF, p.nsoll & 0xFFFF).ljust(out_b, b"\x00")
+                    for p in self._panels)
                 if proto == "TCP":
                     sock.sendall(frame)
                     data = self._recv_exact(sock, inp_size)
@@ -288,11 +304,12 @@ class VfdTcpClient(tk.Tk):
                     data, _ = sock.recvfrom(4096)
                 with self._lock:
                     self._tx += 1; self._rx += 1
-                # dispatch inputs to panels
+                # first word pair of each device's input slot = ZSW1 / NIST
                 vals = []
                 for i in range(n):
-                    if (i + 1) * 4 <= len(data):
-                        z, nist = struct.unpack_from("<HH", data, i * 4)
+                    off = i * in_b
+                    if off + 4 <= len(data):
+                        z, nist = struct.unpack_from(">HH", data, off)
                         vals.append((z, nist))
                     else:
                         vals.append((0, 0))

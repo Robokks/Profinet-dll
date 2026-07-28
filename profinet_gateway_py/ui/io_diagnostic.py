@@ -202,9 +202,7 @@ class _DeviceCard(ttk.LabelFrame):
             nsoll = int(self._force_nsoll_var.get(), 16)
         except ValueError:
             nsoll = 0
-        self._pn.write_outputs(self._idx, stw1, nsoll)
-        # Also update gateway io_data
-        self._gw.set_zsw1_nist(self._idx, stw1, nsoll)
+        self._force_words(stw1, nsoll)
 
     def _force_nsoll(self):
         ds = self._pn.device_state(self._idx)
@@ -213,7 +211,13 @@ class _DeviceCard(ttk.LabelFrame):
             nsoll = int(self._force_nsoll_var.get(), 16)
         except ValueError:
             return
-        self._pn.write_outputs(self._idx, stw1, nsoll)
+        self._force_words(stw1, nsoll)
+
+    def _force_words(self, stw1: int, nsoll: int):
+        # Write into the gateway OUTPUT buffer (big-endian, wire order) so the
+        # bridge propagates and holds it. A connected TCP client would override.
+        import struct
+        self._gw.set_outputs(self._idx, struct.pack(">HH", stw1 & 0xFFFF, nsoll & 0xFFFF))
 
     def _show_stats(self):
         stats = self._pn.get_stats(self._idx)
