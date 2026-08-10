@@ -79,6 +79,13 @@ class MainWindow(tk.Tk):
                                   command=self._open_discovery)
         discovery_btn.grid(row=0, column=2, padx=16)
 
+        monitor_btn = tk.Button(btn_frame, text="Gateway Monitor",
+                                font=("Arial", 13), width=18, height=2,
+                                bg="#455a64", fg="white", relief="flat",
+                                activebackground="#607d8b",
+                                command=self._open_monitor)
+        monitor_btn.grid(row=1, column=0, columnspan=3, pady=(12, 0))
+
         # ── Log ──────────────────────────────────────────────────────────────
         log_frame = ttk.LabelFrame(self, text="Log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
@@ -160,6 +167,10 @@ class MainWindow(tk.Tk):
     def _open_discovery(self):
         from ui.discovery_window import DiscoveryWindow
         DiscoveryWindow(self, self._pn, self._cfg)
+
+    def _open_monitor(self):
+        from ui.gateway_monitor import GatewayMonitorWindow
+        GatewayMonitorWindow(self, self._gw)
 
     def _on_close(self):
         self._bridge.stop()

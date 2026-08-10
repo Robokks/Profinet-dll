@@ -39,6 +39,35 @@ class GatewayServer:
         self._client_conn: Optional[socket.socket] = None
         self._client_addr = None
 
+        # ── traffic monitoring ──
+        self._mon_lock = threading.Lock()
+        self._mon = {"rx_frames": 0, "rx_bytes": 0, "last_rx": b"",
+                     "tx_frames": 0, "tx_bytes": 0, "last_tx": b""}
+
+    def _mon_rx(self, data: bytes):
+        """Record an output frame received from the client (client → EXE)."""
+        with self._mon_lock:
+            self._mon["rx_frames"] += 1
+            self._mon["rx_bytes"] += len(data)
+            self._mon["last_rx"] = bytes(data)
+
+    def _mon_tx(self, data: bytes):
+        """Record an input frame sent to the client (EXE → client)."""
+        with self._mon_lock:
+            self._mon["tx_frames"] += 1
+            self._mon["tx_bytes"] += len(data)
+            self._mon["last_tx"] = bytes(data)
+
+    def get_monitor(self) -> dict:
+        with self._mon_lock:
+            m = dict(self._mon)
+        m["protocol"] = self._protocol
+        m["port"] = self._port
+        m["bind"] = self._bind
+        m["running"] = self._running
+        m["client"] = self._client_addr if self._client_conn else None
+        return m
+
     @property
     def is_running(self) -> bool:
         return self._running
@@ -168,6 +197,7 @@ class GatewayServer:
                     if data is None:
                         break
                     if data:   # full frame (b'' = partial stall → skip this cycle)
+                        self._mon_rx(data)
                         offset = 0
                         with self._lock:
                             for i, dc in enumerate(self._device_configs):
@@ -186,6 +216,7 @@ class GatewayServer:
                                          for i in range(len(self._device_configs)))
                 try:
                     conn.sendall(inp_frame)
+                    self._mon_tx(inp_frame)
                 except OSError:
                     break
 
@@ -261,6 +292,7 @@ class GatewayServer:
                                          for i in range(len(self._device_configs)))
                     try:
                         conn.sendall(struct.pack(">I", len(frame)) + frame)
+                        self._mon_tx(frame)
                     except OSError:
                         break
                 time.sleep(0.02)
@@ -280,6 +312,7 @@ class GatewayServer:
                 payload = self._recv_all(conn, n)
                 if payload is None:
                     break
+                self._mon_rx(payload)
                 offset = 0
                 with self._lock:
                     for i, dc in enumerate(self._device_configs):
@@ -333,6 +366,7 @@ class GatewayServer:
                 data, addr = self._sock.recvfrom(4096)
                 self._client_addr = addr
                 if len(data) >= out_size:
+                    self._mon_rx(data)
                     offset = 0
                     with self._lock:
                         for i, dc in enumerate(self._device_configs):
@@ -344,6 +378,7 @@ class GatewayServer:
                     inp_frame = b"".join(bytes(self._io[i]["inp"])
                                           for i in range(len(self._device_configs)))
                 self._sock.sendto(inp_frame, addr)
+                self._mon_tx(inp_frame)
             except socket.timeout:
                 continue
             except OSError:
