@@ -19,6 +19,43 @@ class Bridge:
         self._thread: Optional[threading.Thread] = None
         self._running = False
 
+        # loop-jitter / spike tracking
+        self._jit_lock = threading.Lock()
+        self._jit_threshold_ms = 20.0
+        self._reset_jitter_locked()
+
+    def _reset_jitter_locked(self):
+        self._jit_count = 0
+        self._jit_sum = 0.0
+        self._jit_max = 0.0
+        self._jit_last = 0.0
+        self._jit_spikes = 0
+
+    def reset_jitter(self):
+        with self._jit_lock:
+            self._reset_jitter_locked()
+
+    def set_jitter_threshold(self, ms: float):
+        with self._jit_lock:
+            self._jit_threshold_ms = max(1.0, float(ms))
+
+    def get_jitter(self) -> dict:
+        with self._jit_lock:
+            avg = self._jit_sum / self._jit_count if self._jit_count else 0.0
+            return {"count": self._jit_count, "avg_ms": avg, "max_ms": self._jit_max,
+                    "last_ms": self._jit_last, "spikes": self._jit_spikes,
+                    "threshold_ms": self._jit_threshold_ms}
+
+    def _track(self, interval_ms: float):
+        with self._jit_lock:
+            self._jit_count += 1
+            self._jit_sum += interval_ms
+            self._jit_last = interval_ms
+            if interval_ms > self._jit_max:
+                self._jit_max = interval_ms
+            if interval_ms > self._jit_threshold_ms:
+                self._jit_spikes += 1
+
     def start(self):
         if self._running:
             return
@@ -34,6 +71,7 @@ class Bridge:
         self._log("[BR] Bridge stopped")
 
     def _run(self):
+        last = time.perf_counter()
         while self._running:
             n = self._pn.device_count()
             for i in range(n):
@@ -65,3 +103,6 @@ class Bridge:
                         ds.nist = struct.unpack_from(">H", inp, 2)[0]
 
             time.sleep(BRIDGE_PERIOD_MS / 1000.0)
+            now = time.perf_counter()
+            self._track((now - last) * 1000.0)
+            last = now

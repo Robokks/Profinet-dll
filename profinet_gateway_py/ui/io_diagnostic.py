@@ -6,14 +6,15 @@ from typing import List
 
 
 class IODiagnosticWindow(tk.Toplevel):
-    def __init__(self, parent, pn_ctrl, gw_server):
+    def __init__(self, parent, pn_ctrl, gw_server, bridge=None):
         super().__init__(parent)
         self.title("IO Diagnostic")
-        self.geometry("700x520")
+        self.geometry("700x560")
         self.resizable(True, True)
 
         self._pn = pn_ctrl
         self._gw = gw_server
+        self._bridge = bridge
         self._cards: List[_DeviceCard] = []
 
         self._build_ui()
@@ -21,6 +22,23 @@ class IODiagnosticWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _build_ui(self):
+        # ── Bridge jitter / spike strip ──
+        if self._bridge is not None:
+            jf = ttk.LabelFrame(self, text="Bridge loop  (real-time jitter)")
+            jf.pack(fill="x", padx=8, pady=(6, 2))
+            self._jit_var = tk.StringVar(value="—")
+            ttk.Label(jf, textvariable=self._jit_var, font=("Courier", 9),
+                      foreground="#37474f").pack(side="left", padx=8, pady=3)
+            ttk.Button(jf, text="Reset", width=7,
+                       command=self._reset_jitter).pack(side="right", padx=4)
+            ttk.Label(jf, text="spike >").pack(side="right")
+            self._jit_thr = tk.StringVar(value="20")
+            e = ttk.Entry(jf, textvariable=self._jit_thr, width=5)
+            e.pack(side="right", padx=2)
+            e.bind("<Return>", lambda ev: self._apply_threshold())
+            ttk.Button(jf, text="set ms", width=7,
+                       command=self._apply_threshold).pack(side="right", padx=2)
+
         # Scrollable frame
         outer = ttk.Frame(self)
         outer.pack(fill="both", expand=True)
@@ -75,9 +93,27 @@ class IODiagnosticWindow(tk.Toplevel):
                             ds.config.total_output_length()))
         return tuple(sig)
 
+    def _reset_jitter(self):
+        if self._bridge is not None:
+            self._bridge.reset_jitter()
+
+    def _apply_threshold(self):
+        if self._bridge is not None:
+            try:
+                self._bridge.set_jitter_threshold(float(self._jit_thr.get()))
+            except ValueError:
+                pass
+
     def _refresh(self):
         if not self.winfo_exists():
             return
+        if self._bridge is not None:
+            j = self._bridge.get_jitter()
+            pct = (100.0 * j["spikes"] / j["count"]) if j["count"] else 0.0
+            self._jit_var.set(
+                f"period avg {j['avg_ms']:.2f} / max {j['max_ms']:.2f} ms   "
+                f"cycles {j['count']}   spikes>{j['threshold_ms']:.0f}ms: "
+                f"{j['spikes']} ({pct:.2f}%)")
         sig = self._config_signature()
         if sig != getattr(self, "_sig", None):
             self._sig = sig

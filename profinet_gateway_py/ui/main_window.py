@@ -162,7 +162,7 @@ class MainWindow(tk.Tk):
 
     def _open_diagnostic(self):
         from ui.io_diagnostic import IODiagnosticWindow
-        IODiagnosticWindow(self, self._pn, self._gw)
+        IODiagnosticWindow(self, self._pn, self._gw, self._bridge)
 
     def _open_discovery(self):
         from ui.discovery_window import DiscoveryWindow
