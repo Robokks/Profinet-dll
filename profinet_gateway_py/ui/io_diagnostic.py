@@ -282,14 +282,22 @@ class _DeviceCard(ttk.LabelFrame):
         win = tk.Toplevel(self)
         win.title(f"Stats — {self._ds.config.station_name or 'Device'}")
         win.resizable(False, False)
+        def us(v):
+            return f"{v/1000.0:.3f} ms  ({int(v)} µs)" if v else "—"
         rows = [
             ("Frames Sent",       stats.frames_sent),
             ("Frames Received",   stats.frames_received),
             ("Missed Cycles",     stats.missed_cycles),
-            ("Watchdog Timeouts", stats.watchdog_timeouts),
-            ("Cycle Counter",     stats.cycle_counter),
+            ("Invalid Frames",    stats.frames_invalid),
+            ("Consec. Timeouts",  stats.consecutive_timeouts),
             ("Connected",         bool(stats.connected)),
             ("Cyclic Running",    bool(stats.cyclic_running)),
+            ("— Cyclic latency —", ""),
+            ("Cycle time (last)", us(stats.last_cycle_us)),
+            ("Cycle time (avg)",  us(stats.avg_cycle_us)),
+            ("Cycle time (min)",  us(stats.min_cycle_us)),
+            ("Cycle time (max)",  us(stats.max_cycle_us)),
+            ("Max jitter",        us(stats.max_jitter_us)),
         ]
         for i, (label, val) in enumerate(rows):
             ttk.Label(win, text=label + ":").grid(row=i, column=0, sticky="w", padx=10, pady=3)

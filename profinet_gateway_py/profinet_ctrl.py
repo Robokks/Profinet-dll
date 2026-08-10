@@ -54,6 +54,14 @@ class Stats:
     cycle_counter: int = 0
     connected: int = 0
     cyclic_running: int = 0
+    # Profinet cyclic timing / latency (microseconds)
+    frames_invalid: int = 0
+    last_cycle_us: int = 0
+    min_cycle_us: int = 0
+    max_cycle_us: int = 0
+    avg_cycle_us: float = 0.0
+    max_jitter_us: int = 0
+    consecutive_timeouts: int = 0
 
 
 @dataclass
@@ -466,9 +474,17 @@ class ProfinetCtrl:
             if cs is not None:
                 st.frames_sent = getattr(cs, "frames_sent", 0)
                 st.frames_received = getattr(cs, "frames_received", 0)
-                st.missed_cycles = getattr(cs, "frames_missed",
-                                           getattr(cs, "missed", 0))
+                st.missed_cycles = getattr(cs, "frames_missed", 0)
+                st.frames_invalid = getattr(cs, "frames_invalid", 0)
                 st.cycle_counter = getattr(cs, "frames_sent", 0)
+                # cyclic latency / jitter
+                st.last_cycle_us = int(getattr(cs, "last_cycle_time_us", 0) or 0)
+                st.min_cycle_us = int(getattr(cs, "min_cycle_time_us", 0) or 0)
+                st.max_cycle_us = int(getattr(cs, "max_cycle_time_us", 0) or 0)
+                st.max_jitter_us = int(getattr(cs, "max_jitter_us", 0) or 0)
+                st.consecutive_timeouts = int(getattr(cs, "consecutive_timeouts", 0) or 0)
+                cnt = getattr(cs, "_cycle_count", 0) or 0
+                st.avg_cycle_us = (getattr(cs, "_cycle_time_sum_us", 0) / cnt) if cnt else 0.0
         return st
 
     def stop(self):
