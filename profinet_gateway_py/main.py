@@ -49,6 +49,14 @@ def main():
         if _app[0] is not None:
             _app[0].log(msg)
 
+    # Low-latency tuning: 1 ms timer resolution (so the 1 ms bridge is real) +
+    # HIGH process priority. Affinity can be set via config.gateway if desired.
+    try:
+        from realtime import enable_realtime
+        enable_realtime(priority="high", timer_1ms=True, log=log)
+    except Exception as e:
+        log(f"[RT] tuning unavailable: {e}")
+
     pn = ProfinetCtrl(log_cb=log)
     gw = GatewayServer(log_cb=log)
     br = Bridge(pn, gw, log_cb=log)
