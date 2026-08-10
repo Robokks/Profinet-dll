@@ -162,6 +162,11 @@ class VfdTcpClient(tk.Tk):
         self._panels = []
         self._tx = 0
         self._rx = 0
+        # round-trip latency (network delay) stats, milliseconds
+        self._rtt = 0.0
+        self._rtt_min = float("inf")
+        self._rtt_max = 0.0
+        self._rtt_avg = 0.0
         self._lock = threading.Lock()
 
         self._build()
@@ -263,6 +268,9 @@ class VfdTcpClient(tk.Tk):
             return
         self._sock = s
         self._connected = True
+        with self._lock:
+            self._rtt = self._rtt_avg = self._rtt_max = 0.0
+            self._rtt_min = float("inf")
         self._conn_btn.configure(text="Disconnect")
         self._status_var.set(f"● Connected {proto} {host}:{port}")
         self._status_lbl.configure(foreground="green")
@@ -294,6 +302,7 @@ class VfdTcpClient(tk.Tk):
                 frame = b"".join(
                     struct.pack(">HH", p.stw1 & 0xFFFF, p.nsoll & 0xFFFF).ljust(out_b, b"\x00")
                     for p in self._panels)
+                t0 = time.perf_counter()
                 if proto == "STM":
                     # [4B BE length][frame] both directions
                     sock.sendall(struct.pack(">I", len(frame)) + frame)
@@ -312,8 +321,13 @@ class VfdTcpClient(tk.Tk):
                 else:
                     sock.sendto(frame, sock._udp_target)
                     data, _ = sock.recvfrom(4096)
+                rtt = (time.perf_counter() - t0) * 1000.0   # network delay, ms
                 with self._lock:
                     self._tx += 1; self._rx += 1
+                    self._rtt = rtt
+                    self._rtt_min = min(self._rtt_min, rtt)
+                    self._rtt_max = max(self._rtt_max, rtt)
+                    self._rtt_avg = rtt if self._rtt_avg == 0 else self._rtt_avg * 0.9 + rtt * 0.1
                 # first word pair of each device's input slot = ZSW1 / NIST
                 vals = []
                 for i in range(n):
@@ -352,7 +366,12 @@ class VfdTcpClient(tk.Tk):
 
     def _refresh_status(self):
         with self._lock:
-            self._stat_var.set(f"tx={self._tx}  rx={self._rx}")
+            if self._rtt_min == float("inf"):
+                rtt = "delay: —"
+            else:
+                rtt = (f"delay(ms) cur {self._rtt:.2f} / avg {self._rtt_avg:.2f} / "
+                       f"min {self._rtt_min:.2f} / max {self._rtt_max:.2f}")
+            self._stat_var.set(f"tx={self._tx}  rx={self._rx}    {rtt}")
         self.after(300, self._refresh_status)
 
     def _on_close(self):
