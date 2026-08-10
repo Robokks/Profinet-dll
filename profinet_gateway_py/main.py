@@ -49,13 +49,23 @@ def main():
         if _app[0] is not None:
             _app[0].log(msg)
 
-    # Low-latency tuning: 1 ms timer resolution (so the 1 ms bridge is real) +
-    # HIGH process priority. Affinity can be set via config.gateway if desired.
-    try:
-        from realtime import enable_realtime
-        enable_realtime(priority="high", timer_1ms=True, log=log)
-    except Exception as e:
-        log(f"[RT] tuning unavailable: {e}")
+    def apply_realtime():
+        """Low-latency tuning from config: 1 ms timer + priority + CPU affinity."""
+        try:
+            from realtime import enable_realtime
+            raw = (getattr(cfg.gateway, "cpu_affinity", "") or "").replace(" ", "")
+            aff = None
+            if raw:
+                try:
+                    aff = [int(x) for x in raw.split(",") if x != ""]
+                except ValueError:
+                    log(f"[RT] bad CPU cores '{raw}' — ignoring")
+            enable_realtime(priority=getattr(cfg.gateway, "priority", "high"),
+                            affinity=aff, timer_1ms=True, log=log)
+        except Exception as e:
+            log(f"[RT] tuning unavailable: {e}")
+
+    apply_realtime()
 
     pn = ProfinetCtrl(log_cb=log)
     gw = GatewayServer(log_cb=log)
@@ -80,6 +90,7 @@ def main():
         br.stop()
         gw.stop()
         pn.stop()
+        apply_realtime()   # re-apply priority / CPU affinity from the new config
         start_services(cfg, pn, gw, br, log)
         log("[APP] Services restarted")
 

@@ -19,6 +19,8 @@ class GwConfigTab(ttk.Frame):
             port=self._port_var.get(),
             bind=self._bind_var.get().strip() or "0.0.0.0",
             framed=bool(self._framed_var.get()),
+            cpu_affinity=self._affinity_var.get().strip(),
+            priority=self._priority_var.get(),
         )
 
     def _build_ui(self):
@@ -57,6 +59,24 @@ class GwConfigTab(ttk.Frame):
         ttk.Checkbutton(frame, text="Per-drive header  [SOF AA55][DriveID][Len][data][EOF 55AA]",
                         variable=self._framed_var).grid(row=3, column=1, sticky="w", **pad)
 
+        # Real-time tuning
+        import os
+        ncpu = os.cpu_count() or 1
+        ttk.Label(frame, text="CPU cores:").grid(row=4, column=0, sticky="w", **pad)
+        arow = ttk.Frame(frame); arow.grid(row=4, column=1, sticky="w", **pad)
+        self._affinity_var = tk.StringVar(value="")
+        ttk.Entry(arow, textvariable=self._affinity_var, width=12).pack(side="left")
+        ttk.Label(arow, text=f"e.g. 2,3   (empty = all;  {ncpu} cores, 0–{ncpu-1})",
+                  foreground="gray").pack(side="left", padx=6)
+
+        ttk.Label(frame, text="Priority:").grid(row=5, column=0, sticky="w", **pad)
+        self._priority_var = tk.StringVar(value="high")
+        ttk.Combobox(frame, textvariable=self._priority_var,
+                     values=("normal", "above", "high"), state="readonly",
+                     width=8).grid(row=5, column=1, sticky="w", **pad)
+        ttk.Label(frame, text="(applied on Apply & Restart; run as Administrator)",
+                  foreground="gray").grid(row=6, column=1, sticky="w", padx=10)
+
         # Info
         info = ttk.LabelFrame(self, text="Frame Layout")
         info.pack(fill="x", padx=10, pady=6)
@@ -84,3 +104,5 @@ class GwConfigTab(ttk.Frame):
         self._port_var.set(self._cfg.port)
         self._bind_var.set(self._cfg.bind)
         self._framed_var.set(1 if getattr(self._cfg, "framed", False) else 0)
+        self._affinity_var.set(getattr(self._cfg, "cpu_affinity", "") or "")
+        self._priority_var.set(getattr(self._cfg, "priority", "high") or "high")

@@ -79,6 +79,8 @@ class GatewayConfig:
     port: int = 5000
     bind: str = "0.0.0.0"
     framed: bool = False      # per-drive [SOF][id][len][data][EOF] framing
+    cpu_affinity: str = ""    # comma-separated core indices, e.g. "2,3" (""=all)
+    priority: str = "high"    # "normal" | "above" | "high" (realtime not exposed)
 
 @dataclass
 class AppConfig:
