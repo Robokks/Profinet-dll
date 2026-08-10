@@ -26,9 +26,11 @@ _GUID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
                       r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 
 # Cyclic timing: send_clock_factor=32 → 1 ms base clock, so the cycle time in
-# milliseconds equals reduction_ratio. 16 ms is a safe default for a gateway.
+# milliseconds equals reduction_ratio. 8 ms balances latency vs. Python jitter
+# (profinet-py allows >=1 ms; warns <8 ms). Lower it further only on a fast,
+# lightly loaded PC.
 _SEND_CLOCK_FACTOR = 32
-_CYCLE_MS = 16
+_CYCLE_MS = 8
 _WATCHDOG_FACTOR = 6
 
 

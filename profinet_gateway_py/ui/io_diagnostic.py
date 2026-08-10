@@ -299,6 +299,21 @@ class _DeviceCard(ttk.LabelFrame):
             ("Cycle time (max)",  us(stats.max_cycle_us)),
             ("Max jitter",        us(stats.max_jitter_us)),
         ]
+        # Estimated gateway<->drive round-trip = 2x bridge poll + 2x cycle time.
+        # Add your client<->gateway TCP RTT (see the VFD client) for the full loop.
+        try:
+            from bridge import BRIDGE_PERIOD_MS
+            cyc_ms = (stats.avg_cycle_us or stats.last_cycle_us) / 1000.0
+            if cyc_ms > 0:
+                rt = 2 * BRIDGE_PERIOD_MS + 2 * cyc_ms
+                rows += [
+                    ("— Round-trip —", ""),
+                    ("Bridge poll", f"{BRIDGE_PERIOD_MS:.1f} ms"),
+                    ("Est. gw↔drive round-trip", f"{rt:.1f} ms"),
+                    ("  (+ your TCP RTT)", "= full LabVIEW loop"),
+                ]
+        except Exception:
+            pass
         for i, (label, val) in enumerate(rows):
             ttk.Label(win, text=label + ":").grid(row=i, column=0, sticky="w", padx=10, pady=3)
             ttk.Label(win, text=str(val)).grid(row=i, column=1, sticky="w", padx=10, pady=3)

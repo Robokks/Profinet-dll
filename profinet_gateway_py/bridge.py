@@ -1,9 +1,13 @@
-"""bridge.py — Data bridge between GatewayServer and ProfinetCtrl (10ms loop)."""
+"""bridge.py — Data bridge between GatewayServer and ProfinetCtrl."""
 
 import threading
 import time
 import struct
 from typing import Optional, Callable
+
+# Bridge poll period. 1 ms keeps the gateway<->Profinet buffer hop low-latency
+# (was 10 ms). Lower = less latency, more CPU.
+BRIDGE_PERIOD_MS = 1.0
 
 
 class Bridge:
@@ -60,4 +64,4 @@ class Bridge:
                         ds.zsw1 = struct.unpack_from(">H", inp, 0)[0]
                         ds.nist = struct.unpack_from(">H", inp, 2)[0]
 
-            time.sleep(0.01)
+            time.sleep(BRIDGE_PERIOD_MS / 1000.0)
