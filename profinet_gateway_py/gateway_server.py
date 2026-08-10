@@ -50,12 +50,22 @@ class GatewayServer:
         self._mon = {"rx_frames": 0, "rx_bytes": 0, "last_rx": b"",
                      "tx_frames": 0, "tx_bytes": 0, "last_tx": b""}
 
+        # ── comms watchdog (fail-safe on client loss) ──
+        self._watchdog_ms = 0
+        self._last_rx_t = 0.0            # perf_counter of last received frame
+        self._watchdog_tripped = False
+        self._wd_thread: Optional[threading.Thread] = None
+
     def _mon_rx(self, data: bytes):
         """Record an output frame received from the client (client → EXE)."""
         with self._mon_lock:
             self._mon["rx_frames"] += 1
             self._mon["rx_bytes"] += len(data)
             self._mon["last_rx"] = bytes(data)
+            self._last_rx_t = time.perf_counter()
+        if self._watchdog_tripped:
+            self._watchdog_tripped = False
+            self._log("[GW] Watchdog cleared — client traffic resumed")
 
     def _mon_tx(self, data: bytes):
         """Record an input frame sent to the client (EXE → client)."""
@@ -72,7 +82,31 @@ class GatewayServer:
         m["bind"] = self._bind
         m["running"] = self._running
         m["client"] = self._client_addr if self._client_conn else None
+        m["watchdog_ms"] = self._watchdog_ms
+        m["watchdog_tripped"] = self._watchdog_tripped
+        with self._mon_lock:
+            m["ms_since_rx"] = ((time.perf_counter() - self._last_rx_t) * 1000.0
+                                if self._last_rx_t else -1)
         return m
+
+    def _zero_outputs(self):
+        """Fail-safe: clear every device's output buffer (STW1=0 → OFF/stop)."""
+        with self._lock:
+            for io in self._io:
+                io["out"][:] = bytes(len(io["out"]))
+
+    def _watchdog_loop(self):
+        while self._running:
+            if self._watchdog_ms > 0:
+                with self._mon_lock:
+                    last = self._last_rx_t
+                if last > 0 and (time.perf_counter() - last) * 1000.0 > self._watchdog_ms:
+                    if not self._watchdog_tripped:
+                        self._watchdog_tripped = True
+                        self._log(f"[GW] WATCHDOG TRIPPED: client silent > "
+                                  f"{self._watchdog_ms} ms — outputs set to SAFE (zero)")
+                    self._zero_outputs()
+            time.sleep(0.02)
 
     @property
     def is_running(self) -> bool:
@@ -83,11 +117,14 @@ class GatewayServer:
         return self._client_conn is not None
 
     def configure(self, protocol: str, port: int, bind: str, device_configs: list,
-                  framed: bool = False):
+                  framed: bool = False, watchdog_ms: int = 0):
         self._protocol  = protocol.upper()
         self._port      = port
         self._bind      = bind
         self._framed    = framed
+        self._watchdog_ms = int(watchdog_ms or 0)
+        self._last_rx_t = 0.0
+        self._watchdog_tripped = False
         self._device_configs = device_configs
         with self._lock:
             self._io = [
@@ -197,9 +234,17 @@ class GatewayServer:
             self._thread = threading.Thread(target=self._tcp_server, daemon=True)
         self._thread.start()
         self._log(f"[GW] {self._protocol} server listening on {self._bind}:{self._port}")
+        if self._watchdog_ms > 0:
+            self._wd_thread = threading.Thread(target=self._watchdog_loop, daemon=True,
+                                               name="gw-watchdog")
+            self._wd_thread.start()
+            self._log(f"[GW] Comms watchdog armed: {self._watchdog_ms} ms → safe stop")
 
     def stop(self):
         self._running = False
+        if self._wd_thread and self._wd_thread.is_alive():
+            self._wd_thread.join(timeout=1.0)
+        self._wd_thread = None
         if self._client_conn:
             try:
                 self._client_conn.close()

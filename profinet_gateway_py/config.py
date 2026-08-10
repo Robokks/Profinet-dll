@@ -81,6 +81,7 @@ class GatewayConfig:
     framed: bool = False      # per-drive [SOF][id][len][data][EOF] framing
     cpu_affinity: str = ""    # comma-separated core indices, e.g. "2,3" (""=all)
     priority: str = "high"    # "normal" | "above" | "high" (realtime not exposed)
+    watchdog_ms: int = 0      # 0 = off; else zero outputs if client silent > ms
 
 @dataclass
 class AppConfig:

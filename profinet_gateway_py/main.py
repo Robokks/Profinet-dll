@@ -22,7 +22,8 @@ def start_services(cfg: AppConfig, pn: ProfinetCtrl,
     # Gateway + bridge start immediately (non-blocking).
     gw.configure(cfg.gateway.protocol, cfg.gateway.port,
                  cfg.gateway.bind, cfg.devices,
-                 framed=getattr(cfg.gateway, "framed", False))
+                 framed=getattr(cfg.gateway, "framed", False),
+                 watchdog_ms=getattr(cfg.gateway, "watchdog_ms", 0))
     gw.start()
     br.start()
 

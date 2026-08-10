@@ -21,6 +21,7 @@ class GwConfigTab(ttk.Frame):
             framed=bool(self._framed_var.get()),
             cpu_affinity=self._affinity_var.get().strip(),
             priority=self._priority_var.get(),
+            watchdog_ms=int(self._watchdog_var.get() or 0),
         )
 
     def _build_ui(self):
@@ -58,6 +59,15 @@ class GwConfigTab(ttk.Frame):
         self._framed_var = tk.IntVar(value=0)
         ttk.Checkbutton(frame, text="Per-drive header  [SOF AA55][DriveID][Len][data][EOF 55AA]",
                         variable=self._framed_var).grid(row=3, column=1, sticky="w", **pad)
+
+        # Comms watchdog
+        ttk.Label(frame, text="Watchdog:").grid(row=7, column=0, sticky="w", **pad)
+        wrow = ttk.Frame(frame); wrow.grid(row=7, column=1, sticky="w", **pad)
+        self._watchdog_var = tk.IntVar(value=0)
+        ttk.Spinbox(wrow, from_=0, to=60000, increment=50, width=8,
+                    textvariable=self._watchdog_var).pack(side="left")
+        ttk.Label(wrow, text="ms  — 0 = off; if client silent longer, outputs → 0 (safe stop)",
+                  foreground="gray").pack(side="left", padx=6)
 
         # Real-time tuning
         import os
@@ -106,3 +116,4 @@ class GwConfigTab(ttk.Frame):
         self._framed_var.set(1 if getattr(self._cfg, "framed", False) else 0)
         self._affinity_var.set(getattr(self._cfg, "cpu_affinity", "") or "")
         self._priority_var.set(getattr(self._cfg, "priority", "high") or "high")
+        self._watchdog_var.set(int(getattr(self._cfg, "watchdog_ms", 0) or 0))

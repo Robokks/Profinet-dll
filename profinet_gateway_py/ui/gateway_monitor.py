@@ -80,10 +80,17 @@ class GatewayMonitorWindow(tk.Toplevel):
         self._hdr_var.set(f"{proto}  {m['bind']}:{m['port']}")
         if m["running"]:
             client = m["client"]
-            if client:
-                self._status_var.set(f"● {proto} listening — client {client[0]}:{client[1]} connected")
-            else:
-                self._status_var.set(f"● {proto} listening — waiting for client")
+            base = (f"client {client[0]}:{client[1]} connected" if client
+                    else "waiting for client")
+            wd = ""
+            if m.get("watchdog_ms"):
+                if m.get("watchdog_tripped"):
+                    wd = f"   ⚠ WATCHDOG TRIPPED (safe stop, >{m['watchdog_ms']}ms silent)"
+                else:
+                    sr = m.get("ms_since_rx", -1)
+                    wd = (f"   watchdog {m['watchdog_ms']}ms ok"
+                          + (f" (last rx {sr:.0f}ms ago)" if sr >= 0 else ""))
+            self._status_var.set(f"● {proto} listening — {base}{wd}")
         else:
             self._status_var.set("● Gateway stopped")
 
