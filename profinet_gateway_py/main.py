@@ -21,7 +21,8 @@ def start_services(cfg: AppConfig, pn: ProfinetCtrl,
     thread so the GUI / Apply & Restart never freezes."""
     # Gateway + bridge start immediately (non-blocking).
     gw.configure(cfg.gateway.protocol, cfg.gateway.port,
-                 cfg.gateway.bind, cfg.devices)
+                 cfg.gateway.bind, cfg.devices,
+                 framed=getattr(cfg.gateway, "framed", False))
     gw.start()
     br.start()
 

@@ -6,6 +6,11 @@ import struct
 import time
 from typing import List, Callable, Optional
 
+# Per-drive framing markers: [SOF 2B][DriveID 1B][Len 2B BE][data][EOF 2B]
+FRAME_SOF = b"\xAA\x55"
+FRAME_EOF = b"\x55\xAA"
+FRAME_OVERHEAD = len(FRAME_SOF) + 1 + 2 + len(FRAME_EOF)   # = 7 bytes per drive
+
 
 class GatewayServer:
     """
@@ -26,6 +31,7 @@ class GatewayServer:
         self._protocol = "TCP"
         self._port = 5000
         self._bind = "0.0.0.0"
+        self._framed = False
         self._device_configs: list = []   # list of DeviceConfig
 
         # Shared IO data — indexed by device index
@@ -76,16 +82,69 @@ class GatewayServer:
     def client_connected(self) -> bool:
         return self._client_conn is not None
 
-    def configure(self, protocol: str, port: int, bind: str, device_configs: list):
+    def configure(self, protocol: str, port: int, bind: str, device_configs: list,
+                  framed: bool = False):
         self._protocol  = protocol.upper()
         self._port      = port
         self._bind      = bind
+        self._framed    = framed
         self._device_configs = device_configs
         with self._lock:
             self._io = [
                 {"out": bytearray(dc.total_output_length()), "inp": bytearray(dc.total_input_length())}
                 for dc in device_configs
             ]
+
+    # ── frame sizing / (un)framing (flat or per-drive SOF/EOF) ───────────────
+    def _out_frame_size(self) -> int:
+        base = sum(dc.total_output_length() for dc in self._device_configs)
+        return base + (FRAME_OVERHEAD * len(self._device_configs) if self._framed else 0)
+
+    def _in_frame_size(self) -> int:
+        base = sum(dc.total_input_length() for dc in self._device_configs)
+        return base + (FRAME_OVERHEAD * len(self._device_configs) if self._framed else 0)
+
+    def _build_inputs(self) -> bytes:
+        """Input frame (device→client): flat concat, or per-drive framed."""
+        with self._lock:
+            if not self._framed:
+                return b"".join(bytes(self._io[i]["inp"])
+                                for i in range(len(self._device_configs)))
+            parts = []
+            for i in range(len(self._device_configs)):
+                data = bytes(self._io[i]["inp"])
+                parts.append(FRAME_SOF + bytes([i & 0xFF]) +
+                             struct.pack(">H", len(data)) + data + FRAME_EOF)
+            return b"".join(parts)
+
+    def _apply_outputs(self, data: bytes):
+        """Output frame (client→device): distribute flat, or parse framed blocks."""
+        if not self._framed:
+            offset = 0
+            with self._lock:
+                for i, dc in enumerate(self._device_configs):
+                    n = dc.total_output_length()
+                    self._io[i]["out"][:n] = data[offset:offset + n]
+                    offset += n
+            return
+        # framed: walk [SOF][id][len][data][EOF] blocks, resync on bad markers
+        pos, n = 0, len(data)
+        with self._lock:
+            while pos + FRAME_OVERHEAD <= n:
+                if data[pos:pos + 2] != FRAME_SOF:
+                    pos += 1
+                    continue
+                drive = data[pos + 2]
+                ln = struct.unpack(">H", data[pos + 3:pos + 5])[0]
+                ds = pos + 5
+                de = ds + ln
+                if de + 2 > n or data[de:de + 2] != FRAME_EOF:
+                    pos += 1
+                    continue
+                if drive < len(self._io):
+                    m = min(ln, len(self._io[drive]["out"]))
+                    self._io[drive]["out"][:m] = data[ds:ds + m]
+                pos = de + 2
 
     def get_outputs(self, idx: int) -> bytearray:
         with self._lock:
@@ -186,8 +245,8 @@ class GatewayServer:
 
     def _handle_tcp_client(self, conn: socket.socket):
         conn.settimeout(0.1)
-        out_size = sum(dc.total_output_length() for dc in self._device_configs)
-        inp_size = sum(dc.total_input_length()  for dc in self._device_configs)
+        out_size = self._out_frame_size()
+        inp_size = self._in_frame_size()
 
         while self._running:
             # Receive output frame from client
@@ -198,12 +257,7 @@ class GatewayServer:
                         break
                     if data:   # full frame (b'' = partial stall → skip this cycle)
                         self._mon_rx(data)
-                        offset = 0
-                        with self._lock:
-                            for i, dc in enumerate(self._device_configs):
-                                n = dc.total_output_length()
-                                self._io[i]["out"][:n] = data[offset:offset + n]
-                                offset += n
+                        self._apply_outputs(data)
                 except socket.timeout:
                     pass
                 except OSError:
@@ -211,9 +265,7 @@ class GatewayServer:
 
             # Send input frame back to client
             if inp_size > 0:
-                with self._lock:
-                    inp_frame = b"".join(bytes(self._io[i]["inp"])
-                                         for i in range(len(self._device_configs)))
+                inp_frame = self._build_inputs()
                 try:
                     conn.sendall(inp_frame)
                     self._mon_tx(inp_frame)
@@ -280,16 +332,14 @@ class GatewayServer:
 
     def _handle_stm_client(self, conn: socket.socket):
         conn.settimeout(0.2)
-        in_size = sum(dc.total_input_length() for dc in self._device_configs)
+        in_size = self._in_frame_size()
         tx_stop = threading.Event()
 
         # TX: stream the input frame (device→controller) continuously (~50 Hz)
         def tx_loop():
             while self._running and not tx_stop.is_set():
                 if in_size > 0:
-                    with self._lock:
-                        frame = b"".join(bytes(self._io[i]["inp"])
-                                         for i in range(len(self._device_configs)))
+                    frame = self._build_inputs()
                     try:
                         conn.sendall(struct.pack(">I", len(frame)) + frame)
                         self._mon_tx(frame)
@@ -313,13 +363,7 @@ class GatewayServer:
                 if payload is None:
                     break
                 self._mon_rx(payload)
-                offset = 0
-                with self._lock:
-                    for i, dc in enumerate(self._device_configs):
-                        m = dc.total_output_length()
-                        if offset + m <= len(payload):
-                            self._io[i]["out"][:m] = payload[offset:offset + m]
-                        offset += m
+                self._apply_outputs(payload)
         except OSError:
             pass
         finally:
@@ -358,25 +402,17 @@ class GatewayServer:
             self._running = False
             return
 
-        out_size = sum(dc.total_output_length() for dc in self._device_configs)
-        inp_size = sum(dc.total_input_length()  for dc in self._device_configs)
+        out_size = self._out_frame_size()
 
         while self._running:
             try:
-                data, addr = self._sock.recvfrom(4096)
+                data, addr = self._sock.recvfrom(65535)
                 self._client_addr = addr
                 if len(data) >= out_size:
                     self._mon_rx(data)
-                    offset = 0
-                    with self._lock:
-                        for i, dc in enumerate(self._device_configs):
-                            n = dc.total_output_length()
-                            self._io[i]["out"][:n] = data[offset:offset + n]
-                            offset += n
+                    self._apply_outputs(data)
                 # Reply with inputs
-                with self._lock:
-                    inp_frame = b"".join(bytes(self._io[i]["inp"])
-                                          for i in range(len(self._device_configs)))
+                inp_frame = self._build_inputs()
                 self._sock.sendto(inp_frame, addr)
                 self._mon_tx(inp_frame)
             except socket.timeout:

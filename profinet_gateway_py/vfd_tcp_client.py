@@ -24,6 +24,11 @@ from tkinter import ttk
 
 NSOLL_100PCT = 0x4000   # PROFIdrive: 0x4000 = 100 % nominal speed
 
+# Per-drive framing (must match gateway_server): [SOF][DriveID][Len BE][data][EOF]
+FRAME_SOF = b"\xAA\x55"
+FRAME_EOF = b"\x55\xAA"
+FRAME_OVERHEAD = 7
+
 # STW1 presets (PROFIdrive control word 1)
 STW1_OFF2   = 0x0000   # coast stop
 STW1_STOP   = 0x047E   # ready / OFF1 (ON bit cleared)
@@ -204,6 +209,8 @@ class VfdTcpClient(tk.Tk):
         self._inb_var = tk.IntVar(value=4)
         ttk.Spinbox(conn, from_=4, to=512, increment=2, width=5,
                     textvariable=self._inb_var).pack(side="left", padx=2)
+        self._framed_var = tk.IntVar(value=0)
+        ttk.Checkbutton(conn, text="Framed", variable=self._framed_var).pack(side="left", padx=6)
         self._conn_btn = ttk.Button(conn, text="Connect", command=self._toggle)
         self._conn_btn.pack(side="left", padx=8)
 
@@ -292,16 +299,26 @@ class VfdTcpClient(tk.Tk):
         # per-device output/input byte counts must match the gateway's telegram
         out_b = max(4, int(self._outb_var.get()))
         in_b = max(4, int(self._inb_var.get()))
-        out_size = n * out_b
-        inp_size = n * in_b
+        framed = bool(self._framed_var.get())
+        per_out = out_b + FRAME_OVERHEAD if framed else out_b
+        per_in = in_b + FRAME_OVERHEAD if framed else in_b
+        out_size = n * per_out
+        inp_size = n * per_in
         sock = self._sock
         while self._connected and sock is not None:
             try:
                 # STW1/NSOLL big-endian (Profinet wire order) in the first
                 # word pair; rest of each device's slot zero-padded.
-                frame = b"".join(
-                    struct.pack(">HH", p.stw1 & 0xFFFF, p.nsoll & 0xFFFF).ljust(out_b, b"\x00")
-                    for p in self._panels)
+                if framed:
+                    frame = b"".join(
+                        FRAME_SOF + bytes([i & 0xFF]) + struct.pack(">H", out_b) +
+                        struct.pack(">HH", p.stw1 & 0xFFFF, p.nsoll & 0xFFFF).ljust(out_b, b"\x00") +
+                        FRAME_EOF
+                        for i, p in enumerate(self._panels))
+                else:
+                    frame = b"".join(
+                        struct.pack(">HH", p.stw1 & 0xFFFF, p.nsoll & 0xFFFF).ljust(out_b, b"\x00")
+                        for p in self._panels)
                 t0 = time.perf_counter()
                 if proto == "STM":
                     # [4B BE length][frame] both directions
@@ -329,14 +346,31 @@ class VfdTcpClient(tk.Tk):
                     self._rtt_max = max(self._rtt_max, rtt)
                     self._rtt_avg = rtt if self._rtt_avg == 0 else self._rtt_avg * 0.9 + rtt * 0.1
                 # first word pair of each device's input slot = ZSW1 / NIST
-                vals = []
-                for i in range(n):
-                    off = i * in_b
-                    if off + 4 <= len(data):
-                        z, nist = struct.unpack_from(">HH", data, off)
-                        vals.append((z, nist))
-                    else:
-                        vals.append((0, 0))
+                if framed:
+                    vals = [(0, 0)] * n
+                    pos = 0
+                    while pos + FRAME_OVERHEAD <= len(data):
+                        if data[pos:pos + 2] != FRAME_SOF:
+                            pos += 1
+                            continue
+                        drv = data[pos + 2]
+                        ln = struct.unpack(">H", data[pos + 3:pos + 5])[0]
+                        ds = pos + 5
+                        de = ds + ln
+                        if de + 2 > len(data) or data[de:de + 2] != FRAME_EOF:
+                            pos += 1
+                            continue
+                        if drv < n and ln >= 4:
+                            vals[drv] = struct.unpack_from(">HH", data, ds)
+                        pos = de + 2
+                else:
+                    vals = []
+                    for i in range(n):
+                        off = i * in_b
+                        if off + 4 <= len(data):
+                            vals.append(struct.unpack_from(">HH", data, off))
+                        else:
+                            vals.append((0, 0))
                 self.after(0, self._apply_inputs, vals)
             except socket.timeout:
                 continue

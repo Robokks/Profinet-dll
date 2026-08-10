@@ -75,9 +75,10 @@ class DeviceConfig:
 
 @dataclass
 class GatewayConfig:
-    protocol: str = "TCP"     # "TCP" or "UDP"
+    protocol: str = "TCP"     # "TCP", "UDP" or "STM"
     port: int = 5000
     bind: str = "0.0.0.0"
+    framed: bool = False      # per-drive [SOF][id][len][data][EOF] framing
 
 @dataclass
 class AppConfig:

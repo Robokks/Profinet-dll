@@ -18,6 +18,7 @@ class GwConfigTab(ttk.Frame):
             protocol=self._proto_var.get(),
             port=self._port_var.get(),
             bind=self._bind_var.get().strip() or "0.0.0.0",
+            framed=bool(self._framed_var.get()),
         )
 
     def _build_ui(self):
@@ -50,6 +51,12 @@ class GwConfigTab(ttk.Frame):
         ttk.Entry(frame, textvariable=self._bind_var, width=18).grid(
             row=2, column=1, sticky="w", **pad)
 
+        # Per-drive framing
+        ttk.Label(frame, text="Framing:").grid(row=3, column=0, sticky="w", **pad)
+        self._framed_var = tk.IntVar(value=0)
+        ttk.Checkbutton(frame, text="Per-drive header  [SOF AA55][DriveID][Len][data][EOF 55AA]",
+                        variable=self._framed_var).grid(row=3, column=1, sticky="w", **pad)
+
         # Info
         info = ttk.LabelFrame(self, text="Frame Layout")
         info.pack(fill="x", padx=10, pady=6)
@@ -66,10 +73,14 @@ class GwConfigTab(ttk.Frame):
             "  STM — LabVIEW streaming: each message is [4-byte BE length][frame],\n"
             "        full-duplex (EXE streams inputs continuously; client streams\n"
             "        outputs). Read/Write with the NI STM library or plain TCP\n"
-            "        Read (4-byte length, then that many bytes)."
+            "        Read (4-byte length, then that many bytes).\n\n"
+            "Per-drive framing (optional): each drive is wrapped as\n"
+            "  [SOF AA 55][DriveID 1B][Len 2B BE][data Len B][EOF 55 AA]\n"
+            "so the client can locate and validate each drive's block."
         ), justify="left", foreground="gray").pack(padx=10, pady=8, anchor="w")
 
     def _load_values(self):
         self._proto_var.set(self._cfg.protocol)
         self._port_var.set(self._cfg.port)
         self._bind_var.set(self._cfg.bind)
+        self._framed_var.set(1 if getattr(self._cfg, "framed", False) else 0)
