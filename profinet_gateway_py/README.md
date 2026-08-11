@@ -7,6 +7,8 @@ struct matching — and the GSDML parser lists **every telegram** defined in a
 device's GSDML (Standard Telegram 1…32, SIEMENS Telegram 111/350/352/353/370,
 Free/Flexible), with human-readable names.
 
+**TCP/UDP/STM frame formats and telegram byte maps:** see [PROTOCOL.md](PROTOCOL.md).
+
 ## Install
 ```
 pip install -r requirements.txt
