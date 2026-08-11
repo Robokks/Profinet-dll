@@ -163,6 +163,87 @@ than the timeout, the gateway zeros every device's output buffer
 (STW1 = 0 → OFF1 ramp-stop) so drives don't keep running on a dead link. It
 clears automatically when traffic resumes.
 
+---
+
+## Complete frame examples (every byte)
+
+Sample values used below:
+`STW1=0x0C7F, OVERRIDE=0x4000, MDI_TARPOS=0x00012345, MDI_VELOCITY=0x00002710,
+MDI_ACC=0x4000, MDI_DEC=0x4000` and feedback `ZSW1=0x0F37, XIST_A=0x00012345,
+NIST_B=0x00002710`. All bytes shown; big-endian.
+
+### A) One device — Standard Telegram 1 (4 B / 4 B)
+
+TCP / UDP (flat):
+```
+client → gateway (4 B):   04 7F 20 00
+gateway → client (4 B):   0F 37 20 00
+```
+STM (length-prefixed):
+```
+client → gateway (8 B):   00 00 00 04  04 7F 20 00
+gateway → client (8 B):   00 00 00 04  0F 37 20 00
+```
+Per-drive framed (11 B = 4 + 7):
+```
+client → gateway:  AA 55 00 00 04  04 7F 20 00  55 AA
+gateway → client:  AA 55 00 00 04  0F 37 20 00  55 AA
+```
+
+### B) One device — SIEMENS Telegram 111 (24 B / 24 B)
+
+Output frame, 24 bytes (STW1 POS_STW1 POS_STW2 STW2 OVERRIDE MDI_TARPOS[4]
+MDI_VELOCITY[4] MDI_ACC MDI_DEC rsvd):
+```
+0C 7F 00 00 00 00 00 00 40 00 00 01 23 45 00 00 27 10 40 00 40 00 00 00
+```
+Input frame, 24 bytes (ZSW1 POS_ZSW1 POS_ZSW2 ZSW2 MELDW XIST_A[4] NIST_B[4]
+FAULT_CODE WARN_CODE rsvd):
+```
+0F 37 00 00 00 00 00 00 00 00 00 01 23 45 00 00 27 10 00 00 00 00 00 00
+```
+
+TCP / UDP (flat, 24 B each way):
+```
+client → gateway:  0C 7F 00 00 00 00 00 00 40 00 00 01 23 45 00 00 27 10 40 00 40 00 00 00
+gateway → client:  0F 37 00 00 00 00 00 00 00 00 00 01 23 45 00 00 27 10 00 00 00 00 00 00
+```
+STM (28 B = 4-byte length 0x00000018 + 24 B):
+```
+client → gateway:  00 00 00 18  0C 7F 00 00 00 00 00 00 40 00 00 01 23 45 00 00 27 10 40 00 40 00 00 00
+gateway → client:  00 00 00 18  0F 37 00 00 00 00 00 00 00 00 00 01 23 45 00 00 27 10 00 00 00 00 00 00
+```
+Per-drive framed (31 B = 24 + 7):
+```
+client → gateway:  AA 55 00 00 18  0C 7F 00 00 00 00 00 00 40 00 00 01 23 45 00 00 27 10 40 00 40 00 00 00  55 AA
+gateway → client:  AA 55 00 00 18  0F 37 00 00 00 00 00 00 00 00 00 01 23 45 00 00 27 10 00 00 00 00 00 00  55 AA
+```
+
+### C) Two devices — Dev0 = Telegram 1 (4 B), Dev1 = Telegram 111 (24 B)
+
+Flat (28 B each way = 4 + 24, in config order):
+```
+client → gateway:
+  04 7F 20 00  0C 7F 00 00 00 00 00 00 40 00 00 01 23 45 00 00 27 10 40 00 40 00 00 00
+  └─ Dev0 ──┘  └────────────────────── Dev1 (24 B) ──────────────────────┘
+
+gateway → client:
+  0F 37 20 00  0F 37 00 00 00 00 00 00 00 00 00 01 23 45 00 00 27 10 00 00 00 00 00 00
+```
+Per-drive framed (42 B = (4+7) + (24+7)):
+```
+client → gateway:
+  AA 55 00 00 04  04 7F 20 00  55 AA
+  AA 55 01 00 18  0C 7F 00 00 00 00 00 00 40 00 00 01 23 45 00 00 27 10 40 00 40 00 00 00  55 AA
+
+gateway → client:
+  AA 55 00 00 04  0F 37 20 00  55 AA
+  AA 55 01 00 18  0F 37 00 00 00 00 00 00 00 00 00 01 23 45 00 00 27 10 00 00 00 00 00 00  55 AA
+```
+STM wraps the whole (flat or framed) payload in one `[4-byte length][payload]`.
+
+---
+
 ## Common STW1 / ZSW1 values (PROFIdrive)
 ```
 STW1  0x047E  ready / OFF1 (ON bit cleared)
