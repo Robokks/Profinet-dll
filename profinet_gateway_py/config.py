@@ -79,6 +79,7 @@ class GatewayConfig:
     port: int = 5000
     bind: str = "0.0.0.0"
     framed: bool = False      # per-drive [SOF][id][len][data][EOF] framing
+    tcp_stream: bool = False  # TCP full-duplex: stream inputs (no request needed)
     cpu_affinity: str = ""    # comma-separated core indices, e.g. "2,3" (""=all)
     priority: str = "high"    # "normal" | "above" | "high" (realtime not exposed)
     watchdog_ms: int = 0      # 0 = off; else zero outputs if client silent > ms

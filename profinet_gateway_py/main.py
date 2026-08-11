@@ -23,7 +23,8 @@ def start_services(cfg: AppConfig, pn: ProfinetCtrl,
     gw.configure(cfg.gateway.protocol, cfg.gateway.port,
                  cfg.gateway.bind, cfg.devices,
                  framed=getattr(cfg.gateway, "framed", False),
-                 watchdog_ms=getattr(cfg.gateway, "watchdog_ms", 0))
+                 watchdog_ms=getattr(cfg.gateway, "watchdog_ms", 0),
+                 tcp_stream=getattr(cfg.gateway, "tcp_stream", False))
     gw.start()
     br.start()
 

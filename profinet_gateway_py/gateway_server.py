@@ -32,6 +32,7 @@ class GatewayServer:
         self._port = 5000
         self._bind = "0.0.0.0"
         self._framed = False
+        self._tcp_stream = False
         self._device_configs: list = []   # list of DeviceConfig
 
         # Shared IO data — indexed by device index
@@ -117,11 +118,12 @@ class GatewayServer:
         return self._client_conn is not None
 
     def configure(self, protocol: str, port: int, bind: str, device_configs: list,
-                  framed: bool = False, watchdog_ms: int = 0):
+                  framed: bool = False, watchdog_ms: int = 0, tcp_stream: bool = False):
         self._protocol  = protocol.upper()
         self._port      = port
         self._bind      = bind
         self._framed    = framed
+        self._tcp_stream = tcp_stream
         self._watchdog_ms = int(watchdog_ms or 0)
         self._last_rx_t = 0.0
         self._watchdog_tripped = False
@@ -289,6 +291,9 @@ class GatewayServer:
                 break
 
     def _handle_tcp_client(self, conn: socket.socket):
+        if self._tcp_stream:
+            self._handle_tcp_stream(conn)
+            return
         conn.settimeout(0.1)
         out_size = self._out_frame_size()
         inp_size = self._in_frame_size()
@@ -353,6 +358,48 @@ class GatewayServer:
                 if waited >= deadline_s:
                     return b""            # partial-frame stall — resync next loop
         return buf
+
+    def _handle_tcp_stream(self, conn: socket.socket):
+        """Full-duplex TCP: stream raw input frames continuously (~50 Hz) while
+        reading raw output frames as they arrive — like STM but with no length
+        prefix, so a passive tool (Hercules) receives data without sending."""
+        conn.settimeout(0.2)
+        out_size = self._out_frame_size()
+        in_size = self._in_frame_size()
+        tx_stop = threading.Event()
+
+        def tx_loop():
+            while self._running and not tx_stop.is_set():
+                if in_size > 0:
+                    frame = self._build_inputs()
+                    try:
+                        conn.sendall(frame)
+                        self._mon_tx(frame)
+                    except OSError:
+                        break
+                time.sleep(0.02)
+
+        tx = threading.Thread(target=tx_loop, daemon=True, name="tcp-stream-tx")
+        tx.start()
+        try:
+            while self._running:
+                if out_size > 0:
+                    data = self._recv_all(conn, out_size)
+                    if data is None:
+                        break
+                    self._mon_rx(data)
+                    self._apply_outputs(data)
+                else:
+                    time.sleep(0.05)
+        except OSError:
+            pass
+        finally:
+            tx_stop.set()
+            tx.join(timeout=1.0)
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # ── STM server (LabVIEW streaming: [4B BE length][frame], full-duplex) ──
     def _stm_server(self):
