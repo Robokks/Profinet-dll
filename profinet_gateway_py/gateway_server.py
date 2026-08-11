@@ -294,31 +294,35 @@ class GatewayServer:
         inp_size = self._in_frame_size()
 
         while self._running:
-            # Receive output frame from client
             if out_size > 0:
+                # Request/response: wait for an output frame, then reply with
+                # inputs. Idle (b'') keeps the connection alive — do NOT drop.
                 try:
                     data = self._recv_exact(conn, out_size)
-                    if data is None:
+                except OSError:
+                    break
+                if data is None:
+                    break                      # client actually disconnected
+                if not data:
+                    continue                   # idle / partial — stay connected
+                self._mon_rx(data)
+                self._apply_outputs(data)
+                if inp_size > 0:
+                    inp_frame = self._build_inputs()
+                    try:
+                        conn.sendall(inp_frame)
+                        self._mon_tx(inp_frame)
+                    except OSError:
                         break
-                    if data:   # full frame (b'' = partial stall → skip this cycle)
-                        self._mon_rx(data)
-                        self._apply_outputs(data)
-                except socket.timeout:
-                    pass
-                except OSError:
-                    break
-
-            # Send input frame back to client
-            if inp_size > 0:
-                inp_frame = self._build_inputs()
-                try:
-                    conn.sendall(inp_frame)
-                    self._mon_tx(inp_frame)
-                except OSError:
-                    break
-
-            # input-only config: no recv above, so pace to avoid a CPU spin
-            if out_size == 0:
+            else:
+                # Input-only config: stream inputs to the client, paced.
+                if inp_size > 0:
+                    inp_frame = self._build_inputs()
+                    try:
+                        conn.sendall(inp_frame)
+                        self._mon_tx(inp_frame)
+                    except OSError:
+                        break
                 time.sleep(0.02)
 
         try:
@@ -328,24 +332,26 @@ class GatewayServer:
 
     @staticmethod
     def _recv_exact(conn: socket.socket, n: int, deadline_s: float = 2.0):
-        """Receive exactly n bytes. Returns None on disconnect, or b'' if a
-        partial frame stalls past the deadline (so a client that sends the
-        wrong frame size can't wedge the server thread forever)."""
+        """Receive exactly n bytes.
+        Returns None ONLY on a real disconnect (recv returns empty).
+        Returns b'' when the client is idle (nothing sent yet) or a partial
+        frame stalls past the deadline — the caller stays connected and loops.
+        """
         buf = b""
         waited = 0.0
         while len(buf) < n:
             try:
                 chunk = conn.recv(n - len(buf))
                 if not chunk:
-                    return None
+                    return None          # peer closed the connection
                 buf += chunk
                 waited = 0.0
             except socket.timeout:
                 if not buf:
-                    return None
+                    return b""            # idle — no bytes yet, keep connection
                 waited += 0.1
                 if waited >= deadline_s:
-                    return b""   # partial-frame stall — resync next loop
+                    return b""            # partial-frame stall — resync next loop
         return buf
 
     # ── STM server (LabVIEW streaming: [4B BE length][frame], full-duplex) ──
