@@ -252,13 +252,45 @@ class ProfinetCtrl:
             # carry no cyclic data).
             ds.dos = do_map
             ds.slot, ds.subslot = do_map[0][0], do_map[0][1]
-            conn = rpc.RPCCon(info)
             setup = rpc.IOCRSetup(slots=io_slots,
                                   send_clock_factor=_SEND_CLOCK_FACTOR,
                                   reduction_ratio=_CYCLE_MS,
                                   watchdog_factor=_WATCHDOG_FACTOR,
                                   data_hold_factor=_WATCHDOG_FACTOR)
-            result = conn.connect(src, iocr_setup=setup)
+
+            # The RPC ObjectUUID's instance number (ObjectUUID_LocalIndex) is 1
+            # by convention, but PROFIdrive profile devices (SINAMICS) can
+            # require 0 — a mismatch is rejected as nca_s_unk_if (0x1C010003).
+            # profinet-py hardcodes 1, so try 1 first, then 0 on that reject.
+            conn = result = None
+            last_exc = None
+            for inst in (1, 0):
+                try:
+                    conn = rpc.RPCCon(info)
+                    if inst != 1:
+                        # object UUID = prefix(10) + instance(2) + device(2)+vendor(2)
+                        ou = conn.remote_object_uuid
+                        conn.remote_object_uuid = (ou[:10]
+                                                   + inst.to_bytes(2, "big") + ou[12:])
+                    result = conn.connect(src, iocr_setup=setup)
+                    if inst != 1:
+                        self._log(f"[PN] Connected with ObjectUUID instance {inst}")
+                    break
+                except Exception as ce:
+                    last_exc = ce
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = None
+                    if "unk_if" in str(ce).lower() or "reject" in str(ce).lower():
+                        if inst == 1:
+                            self._log("[PN] instance-1 Connect refused (unk_if); "
+                                      "retrying with ObjectUUID instance 0…")
+                            continue
+                    raise
+            if conn is None:
+                raise last_exc if last_exc else RuntimeError("connect failed")
             if not result or not getattr(result, "has_cyclic", False):
                 ds.error = "no cyclic AR"
                 ds.connected = False
