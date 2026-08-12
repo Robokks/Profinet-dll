@@ -238,14 +238,22 @@ class ProfinetCtrl:
             finally:
                 sock.close()
 
-            # 2. AR connect with one IOCR slot per Drive Object in the rack
+            # 2. AR connect. The ExpectedSubmoduleBlock MUST describe the
+            #    Device Access Point (slot 0) — the head submodule plus the
+            #    PDEV interface/port submodules — or a real device rejects the
+            #    Connect. profinet-py only sends the slots we give it, so we
+            #    prepend slot 0 from the GSDML for the selected variant, then
+            #    add one IOCR slot per Drive Object (slot 2+, subslot 3).
             dos = dc.effective_drive_objects()
-            io_slots = [rpc.IOSlot(slot=d.slot, subslot=d.subslot,
+            head_slots = self._dap_head_slots(dc)
+            do_slots = [rpc.IOSlot(slot=d.slot, subslot=d.subslot,
                                    input_length=d.input_length,
                                    output_length=d.output_length,
                                    module_ident=d.module_ident,
                                    submodule_ident=d.submodule_ident)
                         for d in dos]
+            io_slots = head_slots + do_slots
+            # Process-data mapping is Drive-Objects only (slot 0 carries no data).
             ds.dos = [(d.slot, d.subslot, d.output_length, d.input_length) for d in dos]
             ds.slot, ds.subslot = dos[0].slot, dos[0].subslot
             conn = rpc.RPCCon(info)
@@ -283,6 +291,13 @@ class ProfinetCtrl:
             ds.connected = False
             ds.error = str(e)
             self._log(f"[PN] Connect failed for {getattr(dc, 'station_name', '?')}: {e}")
+            msg = str(e).lower()
+            if "reject" in msg:
+                self._log("[PN] HINT: the device refused the AR. Check that (1) the "
+                          "selected Device variant matches the real control unit and "
+                          "firmware, (2) the drive object(s)/telegram match the drive's "
+                          "commissioned config (Startdrive/STARTER), and (3) no other "
+                          "controller (PLC) already holds a connection to this device.")
             # clean up any half-open resources so a failed reconnect doesn't leak
             try:
                 if ctrl is not None:
@@ -295,6 +310,41 @@ class ProfinetCtrl:
             except Exception:
                 pass
             return False
+
+    def _dap_head_slots(self, dc):
+        """Slot-0 IOSlots (DAP head + PDEV interface/ports) for the device's
+        selected variant, read from its GSDML. Returns [] (with a warning) if
+        the GSDML can't be read — a real device will then likely reject the AR,
+        but the simulator/flat path still works."""
+        from profinet import rpc
+        path = getattr(dc, "gsdml_path", "") or ""
+        dap_id = getattr(dc, "dap_id", "") or None
+        if not path or not os.path.exists(path):
+            self._log("[PN] WARN: no GSDML on file for this device — AR will omit "
+                      "the Device Access Point (slot 0); a real device may reject it.")
+            return []
+        try:
+            from profinet.gsdml import load_gsdml
+            gdev = load_gsdml(path)
+            # Guard: fall back to the first DAP if the saved id isn't in this GSDML.
+            if dap_id is not None and not any(d.id == dap_id for d in gdev.daps):
+                dap_id = None
+            slots = [s for s in gdev.build_io_slots(dap_id=dap_id) if s.slot == 0]
+            head = [rpc.IOSlot(slot=s.slot, subslot=s.subslot,
+                               input_length=s.input_length,
+                               output_length=s.output_length,
+                               module_ident=s.module_ident,
+                               submodule_ident=s.submodule_ident)
+                    for s in slots]
+            if head:
+                self._log(f"[PN] AR head: Access Point + {len(head) - 1} PDEV "
+                          f"submodule(s) at slot 0 (variant "
+                          f"{dap_id or 'default'}, mod 0x{head[0].module_ident:08X})")
+            return head
+        except Exception as e:
+            self._log(f"[PN] WARN: could not build slot-0 Access Point from GSDML "
+                      f"({e}); AR may be rejected by a real device.")
+            return []
 
     def dcp_discover(self, adapter: str, timeout_ms: int = 2000) -> List[ScanResult]:
         if not self._ok:
