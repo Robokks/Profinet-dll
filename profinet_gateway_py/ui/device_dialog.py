@@ -276,29 +276,49 @@ class DeviceDialog(tk.Toplevel):
         add("", root, 0)
 
     # ── rack operations ──────────────────────────────────────────────────────
+    @staticmethod
+    def _is_telegram(sub) -> bool:
+        """True for a real telegram sub-slot (excludes the Module Access Point
+        and empty sub-module fillers that live at sub-slots 1/2)."""
+        n = (sub.name or "").lower()
+        return "access point" not in n and "empty sub" not in n
+
+    def _telegrams(self, module):
+        """The selectable telegrams of a module (sub-slot 3 candidates)."""
+        return [s for s in module.submodules if self._is_telegram(s)]
+
     def _next_slot(self) -> int:
+        # Drive Objects occupy slots 1..N (slot 0 is the Access Point / head).
         used = [d.slot for d in self._rack]
-        s = 2
+        s = 1
         while s in used:
             s += 1
         return s
 
     def _refresh_rack(self):
         self._rack_tv.delete(*self._rack_tv.get_children())
+        # Slot 0 = the Device Access Point (the control unit head).
         head = self._gsdml.dap_display_name(getattr(self._cfg, "dap_id", ""))
-        self._rack_tv.insert("", "end", text="Slot 0:  <Access Point>", values=("", ""))
         self._rack_tv.insert("", "end",
-                             text=f"Slot 1:  {head} [head]", values=("", ""))
+                             text=f"Slot 0:  {head} [Access Point]", values=("", ""))
+        # Each Drive Object is a module at slot 1..N with three sub-slots:
+        # Module Access Point (1), empty sub-module (2), telegram (3).
         for i, d in enumerate(self._rack):
             pid = self._rack_tv.insert("", "end", iid=f"do{i}",
                                        text=f"Slot {d.slot}:  {d.module_name or '(module)'}",
                                        values=("", ""), open=True)
+            self._rack_tv.insert(pid, "end",
+                                 text="    Sub-slot 1:  Module Access Point",
+                                 values=(1, "0/0"))
+            self._rack_tv.insert(pid, "end",
+                                 text="    Sub-slot 2:  empty sub-module",
+                                 values=(2, "0/0"))
             self._rack_tv.insert(pid, "end", iid=f"tel{i}",
-                                 text=f"    {d.submodule_name or '(no telegram)'}",
-                                 values=(d.subslot, f"{d.input_length}/{d.output_length}"))
+                                 text=f"    Sub-slot 3:  {d.submodule_name or '(no telegram)'}",
+                                 values=(3, f"{d.input_length}/{d.output_length}"))
         tin = sum(d.input_length for d in self._rack)
         tout = sum(d.output_length for d in self._rack)
-        self._len_var.set(f"Use of slots: {len(self._rack)}   |   "
+        self._len_var.set(f"Use of slots: {len(self._rack) + 1}   |   "
                           f"State of data length: Input {tin} / Output {tout} Octets")
 
     def _selected_do_index(self):
@@ -332,11 +352,15 @@ class DeviceDialog(tk.Toplevel):
 
     def _do_add_module(self, idx):
         m = self._gsdml.modules[idx]
-        do = DriveObject(slot=self._next_slot(), subslot=1,
+        do = DriveObject(slot=self._next_slot(), subslot=3,
                          module_ident=m.ident, module_name=m.name)
-        if m.submodules:
-            s = m.submodules[0]
-            do.subslot = 3
+        # Default to the module's first standard telegram (skip the Access
+        # Point / empty fillers, and prefer a non-PROFIsafe telegram).
+        tels = self._telegrams(m)
+        pref = [s for s in tels if "profisafe" not in (s.name or "").lower()]
+        choice = pref or tels
+        if choice:
+            s = choice[0]
             do.submodule_ident, do.submodule_name = s.ident, s.name
             do.input_length, do.output_length = s.input_length, s.output_length
         self._rack.append(do)
@@ -349,15 +373,18 @@ class DeviceDialog(tk.Toplevel):
             return
         d = self._rack[idx]
         m = self._gsdml.get_module(d.module_ident)
-        if not m or not m.submodules:
+        if not m:
             return
-        self._chooser("Select Telegram",
+        tels = self._telegrams(m)
+        if not tels:
+            return
+        self._chooser("Select Telegram (sub-slot 3)",
                       [f"{s.name}  ({s.input_length}/{s.output_length} B)"
-                       for s in m.submodules],
-                      lambda si: self._do_set_telegram(idx, m, si))
+                       for s in tels],
+                      lambda si: self._do_set_telegram(idx, tels, si))
 
-    def _do_set_telegram(self, do_idx, module, sub_idx):
-        s = module.submodules[sub_idx]
+    def _do_set_telegram(self, do_idx, tels, sub_idx):
+        s = tels[sub_idx]
         d = self._rack[do_idx]
         d.subslot = 3
         d.submodule_ident, d.submodule_name = s.ident, s.name

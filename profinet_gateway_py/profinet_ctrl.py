@@ -238,24 +238,19 @@ class ProfinetCtrl:
             finally:
                 sock.close()
 
-            # 2. AR connect. The ExpectedSubmoduleBlock MUST describe the
-            #    Device Access Point (slot 0) — the head submodule plus the
-            #    PDEV interface/port submodules — or a real device rejects the
-            #    Connect. profinet-py only sends the slots we give it, so we
-            #    prepend slot 0 from the GSDML for the selected variant, then
-            #    add one IOCR slot per Drive Object (slot 2+, subslot 3).
+            # 2. AR connect. The ExpectedSubmoduleBlock MUST mirror the device's
+            #    real topology or a device rejects the Connect: the Device Access
+            #    Point at slot 0 (head + PDEV interface/ports) AND, for each Drive
+            #    Object, its Module Access Point (sub-slot 1) + empty sub-module
+            #    (sub-slot 2) + the telegram (sub-slot 3). profinet-py only sends
+            #    the slots we give it, so we build the whole topology from the
+            #    GSDML for the selected variant.
             dos = dc.effective_drive_objects()
-            head_slots = self._dap_head_slots(dc)
-            do_slots = [rpc.IOSlot(slot=d.slot, subslot=d.subslot,
-                                   input_length=d.input_length,
-                                   output_length=d.output_length,
-                                   module_ident=d.module_ident,
-                                   submodule_ident=d.submodule_ident)
-                        for d in dos]
-            io_slots = head_slots + do_slots
-            # Process-data mapping is Drive-Objects only (slot 0 carries no data).
-            ds.dos = [(d.slot, d.subslot, d.output_length, d.input_length) for d in dos]
-            ds.slot, ds.subslot = dos[0].slot, dos[0].subslot
+            io_slots, do_map = self._build_expected_slots(dc)
+            # Process-data mapping = the telegram sub-slots (slot 0 / MAP / empty
+            # carry no cyclic data).
+            ds.dos = do_map
+            ds.slot, ds.subslot = do_map[0][0], do_map[0][1]
             conn = rpc.RPCCon(info)
             setup = rpc.IOCRSetup(slots=io_slots,
                                   send_clock_factor=_SEND_CLOCK_FACTOR,
@@ -311,39 +306,109 @@ class ProfinetCtrl:
                 pass
             return False
 
+    def _build_expected_slots(self, dc):
+        """Build the full ExpectedSubmodule slot list for the AR, matching the
+        device's real topology, and return (io_slots, do_map).
+
+        io_slots (list of rpc.IOSlot):
+          - slot 0: Device Access Point head + PDEV interface/port sub-modules
+          - slot N (per Drive Object, N=1..): Module Access Point (sub-slot 1),
+            empty sub-module (sub-slot 2, when the module allows it) and the
+            selected telegram (sub-slot 3).
+        do_map (list of (slot, subslot, out_len, in_len)): the data-bearing
+          telegram sub-slots, used by the cyclic read/write path.
+
+        Driven by the device's GSDML for the selected variant. Drive Objects are
+        renumbered to consecutive slots 1..N (SINAMICS places the first DO at
+        slot 1). Falls back to a DAP-head + telegram-only layout if the GSDML
+        can't drive it (e.g. a non-SINAMICS device or a missing file); a real
+        device may reject that fallback, which is logged."""
+        from profinet import rpc
+        dos = dc.effective_drive_objects()
+        path = getattr(dc, "gsdml_path", "") or ""
+        dap_id = getattr(dc, "dap_id", "") or None
+        try:
+            if not path or not os.path.exists(path):
+                raise RuntimeError("no GSDML file on record")
+            from profinet.gsdml import load_gsdml
+            gd = load_gsdml(path)
+            if dap_id is not None and not any(d.id == dap_id for d in gd.daps):
+                dap_id = None
+            mod_id_by_ident = {m.module_ident: mid for mid, m in gd.modules.items()}
+            sub_id_by_ident = {s.submodule_ident: sid
+                               for sid, s in gd.submodule_catalog.items()}
+
+            slot_assignment = {}
+            submodule_assignment = {}
+            do_map = []
+            for i, d in enumerate(dos):
+                slot = i + 1
+                mid = mod_id_by_ident.get(d.module_ident)
+                tel = sub_id_by_ident.get(d.submodule_ident)
+                if mid is None or tel is None:
+                    raise RuntimeError(
+                        f"module 0x{d.module_ident:08X}/telegram "
+                        f"0x{d.submodule_ident:08X} not found in GSDML")
+                slot_assignment[slot] = mid
+                sa = {3: tel}
+                mod = gd.modules.get(mid)
+                allowed = getattr(mod, "allowed_subslots", {}) or {}
+                # Fill sub-slot 2 with the 'empty sub-module' when the module
+                # permits it there (SINAMICS DOs, matching SYCON.net).
+                if "IDS_EMPTY" in allowed and 2 in allowed["IDS_EMPTY"]:
+                    sa[2] = "IDS_EMPTY"
+                submodule_assignment[slot] = sa
+                do_map.append((slot, 3, d.output_length, d.input_length))
+
+            slots = gd.build_io_slots(slot_assignment=slot_assignment,
+                                      submodule_assignment=submodule_assignment,
+                                      dap_id=dap_id)
+            io_slots = [rpc.IOSlot(slot=s.slot, subslot=s.subslot,
+                                   input_length=s.input_length,
+                                   output_length=s.output_length,
+                                   module_ident=s.module_ident,
+                                   submodule_ident=s.submodule_ident)
+                        for s in slots]
+            self._log(f"[PN] AR topology from GSDML: {len(io_slots)} sub-module(s) "
+                      f"for {len(dos)} Drive Object(s), variant {dap_id or 'default'}")
+            return io_slots, do_map
+        except Exception as e:
+            self._log(f"[PN] WARN: could not build full AR topology from GSDML "
+                      f"({e}); using DAP-head + telegram fallback — a real device "
+                      f"may reject this.")
+            head = self._dap_head_slots(dc)
+            do_slots = [rpc.IOSlot(slot=d.slot, subslot=d.subslot,
+                                   input_length=d.input_length,
+                                   output_length=d.output_length,
+                                   module_ident=d.module_ident,
+                                   submodule_ident=d.submodule_ident)
+                        for d in dos]
+            do_map = [(d.slot, d.subslot, d.output_length, d.input_length)
+                      for d in dos]
+            return head + do_slots, do_map
+
     def _dap_head_slots(self, dc):
         """Slot-0 IOSlots (DAP head + PDEV interface/ports) for the device's
-        selected variant, read from its GSDML. Returns [] (with a warning) if
-        the GSDML can't be read — a real device will then likely reject the AR,
-        but the simulator/flat path still works."""
+        selected variant, read from its GSDML. Returns [] if the GSDML can't be
+        read. Used by the fallback path in _build_expected_slots."""
         from profinet import rpc
         path = getattr(dc, "gsdml_path", "") or ""
         dap_id = getattr(dc, "dap_id", "") or None
         if not path or not os.path.exists(path):
-            self._log("[PN] WARN: no GSDML on file for this device — AR will omit "
-                      "the Device Access Point (slot 0); a real device may reject it.")
             return []
         try:
             from profinet.gsdml import load_gsdml
             gdev = load_gsdml(path)
-            # Guard: fall back to the first DAP if the saved id isn't in this GSDML.
             if dap_id is not None and not any(d.id == dap_id for d in gdev.daps):
                 dap_id = None
             slots = [s for s in gdev.build_io_slots(dap_id=dap_id) if s.slot == 0]
-            head = [rpc.IOSlot(slot=s.slot, subslot=s.subslot,
+            return [rpc.IOSlot(slot=s.slot, subslot=s.subslot,
                                input_length=s.input_length,
                                output_length=s.output_length,
                                module_ident=s.module_ident,
                                submodule_ident=s.submodule_ident)
                     for s in slots]
-            if head:
-                self._log(f"[PN] AR head: Access Point + {len(head) - 1} PDEV "
-                          f"submodule(s) at slot 0 (variant "
-                          f"{dap_id or 'default'}, mod 0x{head[0].module_ident:08X})")
-            return head
-        except Exception as e:
-            self._log(f"[PN] WARN: could not build slot-0 Access Point from GSDML "
-                      f"({e}); AR may be rejected by a real device.")
+        except Exception:
             return []
 
     def dcp_discover(self, adapter: str, timeout_ms: int = 2000) -> List[ScanResult]:
