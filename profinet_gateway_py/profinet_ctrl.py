@@ -367,17 +367,39 @@ class ProfinetCtrl:
     }
 
     def _patch_alarm_cr(self, conn):
-        """Force AlarmCRProperties.Priority=1 in the AR's AlarmCR block.
-        profinet-py hardcodes AlarmCRProperties=0, which SINAMICS rejects
-        (Connect error AlarmCR/AlarmCRProperties). connect() calls
-        conn._build_alarm_cr_block() with no args, so wrap it to pass
-        priority=1 (Transport stays 0 = Layer-2 RT)."""
+        """Adjust the AR's AlarmCR block to values a real SINAMICS accepts.
+        profinet-py sends bare minimums (RTATimeoutFactor=1, RTARetries=3,
+        MaxAlarmDataLength=200, AlarmCRProperties=0) that the drive rejects
+        (Connect error AlarmCR). Every field is overridable by env var so the
+        working combination can be found without recompiling:
+
+          PN_ALARM_PROPS    AlarmCRProperties (default 0; bit0=priority, bit1=transport)
+          PN_ALARM_MAXDATA  MaxAlarmDataLength (default 1432 = spec max)
+          PN_ALARM_RTATF    RTATimeoutFactor   (default 1)
+          PN_ALARM_RTAR     RTARetries         (default 3)
+        """
         try:
+            from profinet.rpc import PNAlarmCRBlockReq as A
+            props = int(os.environ.get("PN_ALARM_PROPS", "0"), 0)
+            maxdata = int(os.environ.get("PN_ALARM_MAXDATA", "1432"), 0)
+            rtatf = int(os.environ.get("PN_ALARM_RTATF",
+                        str(A.DEFAULT_RTA_TIMEOUT_FACTOR)), 0)
+            rtar = int(os.environ.get("PN_ALARM_RTAR",
+                       str(A.DEFAULT_RTA_RETRIES)), 0)
+            # These are read at build time from the class, so patching them here
+            # changes what _build_alarm_cr_block() emits.
+            A.DEFAULT_MAX_ALARM_DATA_LENGTH = maxdata
+            A.DEFAULT_RTA_TIMEOUT_FACTOR = rtatf
+            A.DEFAULT_RTA_RETRIES = rtar
+            priority = props & 0x1
+            transport = (props >> 1) & 0x1
             orig = conn._build_alarm_cr_block
             conn._build_alarm_cr_block = (
-                lambda transport=0, priority=1: orig(transport, priority))
+                lambda t=transport, p=priority: orig(t, p))
+            self._log(f"[PN] AlarmCR: props=0x{props:04X} maxdata={maxdata} "
+                      f"rtatf={rtatf} rtar={rtar}")
         except Exception as e:
-            self._log(f"[PN] WARN: could not adjust AlarmCRProperties ({e})")
+            self._log(f"[PN] WARN: could not adjust AlarmCR block ({e})")
 
     def _rpc_capture_begin(self):
         """Attach a DEBUG capture to profinet-py's RPC logger so a failed
