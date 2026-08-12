@@ -272,6 +272,11 @@ class ProfinetCtrl:
                         ou = conn.remote_object_uuid
                         conn.remote_object_uuid = (ou[:10]
                                                    + inst.to_bytes(2, "big") + ou[12:])
+                    # SINAMICS rejects AlarmCRProperties=0 (ErrorCode1=3 AlarmCR,
+                    # ErrorCode2=6). Force Priority=1 (0x0001); Transport stays 0
+                    # (Layer-2 RT), reserved bits 0 — so 0x0001 is the only other
+                    # valid value. profinet-py hardcodes 0.
+                    self._patch_alarm_cr(conn)
                     result = conn.connect(src, iocr_setup=setup)
                     if inst != 1:
                         self._log(f"[PN] Connected with ObjectUUID instance {inst}")
@@ -360,6 +365,19 @@ class ProfinetCtrl:
         0x1C010015: "nca_s_manager_not_entered",
         0x1C01001B: "nca_s_wrong_kind_of_bindings",
     }
+
+    def _patch_alarm_cr(self, conn):
+        """Force AlarmCRProperties.Priority=1 in the AR's AlarmCR block.
+        profinet-py hardcodes AlarmCRProperties=0, which SINAMICS rejects
+        (Connect error AlarmCR/AlarmCRProperties). connect() calls
+        conn._build_alarm_cr_block() with no args, so wrap it to pass
+        priority=1 (Transport stays 0 = Layer-2 RT)."""
+        try:
+            orig = conn._build_alarm_cr_block
+            conn._build_alarm_cr_block = (
+                lambda transport=0, priority=1: orig(transport, priority))
+        except Exception as e:
+            self._log(f"[PN] WARN: could not adjust AlarmCRProperties ({e})")
 
     def _rpc_capture_begin(self):
         """Attach a DEBUG capture to profinet-py's RPC logger so a failed
