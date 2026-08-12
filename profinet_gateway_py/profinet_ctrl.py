@@ -213,6 +213,7 @@ class ProfinetCtrl:
                       f"Configuration, set the station name, Apply & Restart.")
             return False
         conn = ctrl = None
+        cap = self._rpc_capture_begin()
         try:
             from profinet import dcp, rpc
             from profinet.rt import build_iocr_configs
@@ -287,7 +288,10 @@ class ProfinetCtrl:
             ds.error = str(e)
             self._log(f"[PN] Connect failed for {getattr(dc, 'station_name', '?')}: {e}")
             msg = str(e).lower()
-            if "reject" in msg:
+            if "reject" in msg or "fault" in msg:
+                # Dump the exact request we sent and the device's reject bytes,
+                # then decode the DCE/RPC reject code — this pinpoints the cause.
+                self._rpc_capture_report(cap)
                 self._log("[PN] HINT: the device refused the AR. Check that (1) the "
                           "selected Device variant matches the real control unit and "
                           "firmware, (2) the drive object(s)/telegram match the drive's "
@@ -305,6 +309,99 @@ class ProfinetCtrl:
             except Exception:
                 pass
             return False
+        finally:
+            self._rpc_capture_end(cap)
+
+    # ── DCE/RPC reject diagnostics ───────────────────────────────────────────
+    # DCE 1.1 connectionless reject status codes (facility 0x1c). PROFINET
+    # devices send one of these in a reject PDU when they refuse the Connect.
+    _NCA_REJECT = {
+        0x1C010001: "nca_s_comm_failure",
+        0x1C010002: "nca_s_op_rng_error (unknown operation number)",
+        0x1C010003: "nca_s_unk_if (unknown interface UUID)",
+        0x1C010006: "nca_s_wrong_boot_time",
+        0x1C010009: "nca_s_you_crashed",
+        0x1C01000B: "nca_s_proto_error",
+        0x1C01000C: "nca_s_who_are_you_failed",
+        0x1C010013: "nca_s_out_args_too_big",
+        0x1C010014: "nca_s_server_too_busy",
+        0x1C010015: "nca_s_manager_not_entered",
+        0x1C01001B: "nca_s_wrong_kind_of_bindings",
+    }
+
+    def _rpc_capture_begin(self):
+        """Attach a DEBUG capture to profinet-py's RPC logger so a failed
+        connect can print the exact request + device response bytes into the
+        normal log (no PN_DEBUG env var needed)."""
+        import logging
+        try:
+            handler = logging.Handler()
+            handler.setLevel(logging.DEBUG)
+            handler._msgs = []
+            handler.emit = lambda rec, h=handler: h._msgs.append(rec.getMessage())
+            lg = logging.getLogger("profinet")
+            handler._lg = lg
+            handler._old_level = lg.level
+            handler._old_prop = lg.propagate
+            lg.setLevel(logging.DEBUG)
+            lg.addHandler(handler)
+            return handler
+        except Exception:
+            return None
+
+    def _rpc_capture_end(self, cap):
+        try:
+            if cap is not None:
+                cap._lg.removeHandler(cap)
+                cap._lg.setLevel(cap._old_level)
+        except Exception:
+            pass
+
+    def _rpc_capture_report(self, cap):
+        if cap is None:
+            return
+        try:
+            req = resp = None
+            for m in cap._msgs:
+                if m.startswith("RPC request ("):
+                    req = m
+                elif m.startswith("RPC response raw"):
+                    resp = m
+            if req:
+                self._log("[PN] AR Connect request bytes: "
+                          + req.split(": ", 1)[-1].strip())
+            if resp:
+                hexpart = resp.split(": ", 1)[-1].replace("...", "").strip()
+                self._log("[PN] Device reject bytes: " + hexpart)
+                self._decode_reject(hexpart)
+            else:
+                self._log("[PN] (no device response captured — likely a timeout "
+                          "or the reject came before logging; set PN_DEBUG=1 for full trace)")
+        except Exception:
+            pass
+
+    def _decode_reject(self, hexpart):
+        """Best-effort decode of a DCE/RPC reject PDU status code."""
+        try:
+            b = bytes.fromhex(hexpart.replace(" ", ""))
+        except Exception:
+            return
+        if len(b) < 2:
+            return
+        ptype = b[1]
+        if ptype != 6:  # 6 = REJECT
+            self._log(f"[PN] (response packet type 0x{ptype:02X}, not a plain reject)")
+            return
+        # Connectionless DCE/RPC header is 80 bytes; the reject body starts with
+        # a 4-byte status. Endianness follows DREP (byte 4); try both, prefer a
+        # known code.
+        if len(b) >= 84:
+            le = int.from_bytes(b[80:84], "little")
+            be = int.from_bytes(b[80:84], "big")
+            code = le if le in self._NCA_REJECT else (be if be in self._NCA_REJECT else le)
+            name = self._NCA_REJECT.get(code)
+            self._log(f"[PN] DCE/RPC reject status = 0x{code:08X}"
+                      + (f"  ({name})" if name else "  (unrecognized — paste this line to me)"))
 
     def _build_expected_slots(self, dc):
         """Build the full ExpectedSubmodule slot list for the AR, matching the
