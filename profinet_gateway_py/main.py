@@ -38,8 +38,31 @@ def start_services(cfg: AppConfig, pn: ProfinetCtrl,
                          name="pn-connect").start()
 
 
+def _enable_pn_debug():
+    """When PN_DEBUG=1, turn on profinet-py's DEBUG logging (raw RPC request +
+    device response bytes) to console and pn_debug.log next to the app. This is
+    how we capture *why* a real device rejects the AR Connect."""
+    import logging
+    if os.environ.get("PN_DEBUG", "") not in ("1", "true", "TRUE", "yes"):
+        return None
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pn_debug.log")
+    fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    lg = logging.getLogger("profinet")
+    lg.setLevel(logging.DEBUG)
+    lg.addHandler(fh)
+    lg.addHandler(sh)
+    lg.propagate = False
+    return log_path
+
+
 def main():
     cfg = load_config()
+
+    _pn_debug_path = _enable_pn_debug()
 
     # Use a list cell so log() can reference the app before it's created
     log_lines = []
@@ -50,6 +73,9 @@ def main():
         log_lines.append(msg)
         if _app[0] is not None:
             _app[0].log(msg)
+
+    if _pn_debug_path:
+        log(f"[PN] DEBUG logging enabled -> {_pn_debug_path}")
 
     def apply_realtime():
         """Low-latency tuning from config: 1 ms timer + priority + CPU affinity."""
