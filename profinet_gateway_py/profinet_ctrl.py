@@ -402,6 +402,13 @@ class ProfinetCtrl:
             name = self._NCA_REJECT.get(code)
             self._log(f"[PN] DCE/RPC reject status = 0x{code:08X}"
                       + (f"  ({name})" if name else "  (unrecognized — paste this line to me)"))
+            if code == 0x1C010003:  # nca_s_unk_if
+                self._log("[PN] -> The device's RPC runtime does not accept this AR "
+                          "Connect. Our interface/object UUIDs are the standard "
+                          "PROFINET values, so this is a stack-level incompatibility "
+                          "(profinet-py vs this device). To fix it, capture a WORKING "
+                          "master's Connect to this drive and compare the DCE/RPC "
+                          "header (object UUID, interface version).")
 
     def _build_expected_slots(self, dc):
         """Build the full ExpectedSubmodule slot list for the AR, matching the
