@@ -51,6 +51,17 @@ class ModuleInfo:
 
 
 @dataclass
+class DapInfo:
+    """One Device Access Point (device variant) from the GSDML — e.g.
+    'SINAMICS S120/S150 CU320-2 PN V5.2'. A GSDML holds many; the head module
+    identity and the default DNS station name both depend on which is chosen."""
+    id: str             # GSDML ID attr, e.g. "IDD_CU320PN-V5.2"
+    name: str           # resolved display name, e.g. "SINAMICS ... CU320-2 PN V5.2"
+    module_ident: int   # ModuleIdentNumber of the access point (head)
+    dns_name: str       # DNS_CompatibleName — the default station name
+
+
+@dataclass
 class GSDMLDevice:
     path: str
     vendor_name: str
@@ -59,9 +70,38 @@ class GSDMLDevice:
     device_id: int
     modules: List[ModuleInfo] = field(default_factory=list)
     bitmap_data: Optional[bytes] = None
+    # Device variants (DeviceAccessPoints). selected_dap_id names the active one.
+    daps: List["DapInfo"] = field(default_factory=list)
+    selected_dap_id: str = ""
+    head_module_ident: int = 0
 
     def display_name(self) -> str:
         return f"{self.device_name} ({os.path.basename(self.path)})"
+
+    def get_dap(self, dap_id: str = "") -> Optional["DapInfo"]:
+        """The DAP matching dap_id (or the selected one, or the first)."""
+        want = dap_id or self.selected_dap_id
+        for d in self.daps:
+            if d.id == want:
+                return d
+        return self.daps[0] if self.daps else None
+
+    def select_dap(self, dap_id: str) -> bool:
+        """Make dap_id the active variant; updates the head module ident."""
+        for d in self.daps:
+            if d.id == dap_id:
+                self.selected_dap_id = d.id
+                self.head_module_ident = d.module_ident
+                return True
+        return False
+
+    def dap_display_name(self, dap_id: str = "") -> str:
+        d = self.get_dap(dap_id)
+        return d.name if d else self.device_name
+
+    def dap_dns_name(self, dap_id: str = "") -> str:
+        d = self.get_dap(dap_id)
+        return d.dns_name if d else ""
 
     def get_module(self, ident: int) -> Optional[ModuleInfo]:
         for m in self.modules:
@@ -173,24 +213,40 @@ def _extract_submodule_items(root, tmap: Dict[str, str]) -> Dict[str, list]:
 
 
 def _extract_names_and_identity(path: str):
-    """Return (id2name, identity, bitmap) parsed straight from the XML.
+    """Return (id2name, identity, bitmap, sub_items, daps) parsed from the XML.
 
     id2name: maps a Module/Submodule item's ID attribute -> resolved name.
     identity: (vendor_name, device_name, vendor_id, device_id).
     bitmap: base64-decoded PNG bytes from GraphicsList, or None.
+    daps: list of DapInfo (every device variant / DeviceAccessPointItem).
     """
     id2name: Dict[str, str] = {}
     vendor_name = device_name = ""
     vendor_id = device_id = 0
     bitmap: Optional[bytes] = None
     sub_items: Dict[str, list] = {}
+    daps: List[DapInfo] = []
     try:
         root = ET.parse(path).getroot()
     except Exception:
-        return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap, sub_items
+        return (id2name, (vendor_name, device_name, vendor_id, device_id),
+                bitmap, sub_items, daps)
 
     tmap = _build_text_map(root)
     sub_items = _extract_submodule_items(root, tmap)
+
+    # Every DeviceAccessPointItem = one selectable device variant.
+    for item in _iter(root, "DeviceAccessPointItem"):
+        did = item.get("ID")
+        if not did:
+            continue
+        dns = item.get("DNS_CompatibleName", "") or ""
+        daps.append(DapInfo(
+            id=did,
+            name=_resolve_name(item, tmap) or dns or did,
+            module_ident=_to_int(item.get("ModuleIdentNumber", "0")),
+            dns_name=dns,
+        ))
 
     for tag in ("ModuleItem", "SubmoduleItem", "VirtualSubmoduleItem",
                 "DeviceAccessPointItem"):
@@ -208,9 +264,14 @@ def _extract_names_and_identity(path: str):
         if info is not None and not vendor_name:
             vendor_name = info.get("Value", "") or ""
 
-    dap = _first(root, "DeviceAccessPointItem")
-    if dap is not None:
-        device_name = dap.get("DNS_CompatibleName", "") or ""
+    # Default device name = first variant's friendly name (matches the catalog
+    # label the user sees in tools like SYCON.net); fall back to DNS / filename.
+    if daps:
+        device_name = daps[0].name
+    else:
+        dap = _first(root, "DeviceAccessPointItem")
+        if dap is not None:
+            device_name = dap.get("DNS_CompatibleName", "") or ""
     if not device_name:
         device_name = os.path.splitext(os.path.basename(path))[0]
 
@@ -245,7 +306,8 @@ def _extract_names_and_identity(path: str):
         if gfile:
             bitmap = _read_graphic_file(os.path.dirname(os.path.abspath(path)), gfile)
 
-    return id2name, (vendor_name, device_name, vendor_id, device_id), bitmap, sub_items
+    return (id2name, (vendor_name, device_name, vendor_id, device_id),
+            bitmap, sub_items, daps)
 
 
 def _read_graphic_file(base_dir: str, gfile: str) -> Optional[bytes]:
@@ -277,12 +339,16 @@ def _read_graphic_file(base_dir: str, gfile: str) -> Optional[bytes]:
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
-def parse_gsdml(path: str) -> GSDMLDevice:
-    """Parse a GSDML file into a GSDMLDevice, listing every telegram."""
+def parse_gsdml(path: str, dap_id: str = "") -> GSDMLDevice:
+    """Parse a GSDML file into a GSDMLDevice, listing every telegram.
+
+    dap_id selects which device variant (DeviceAccessPoint) is active; empty
+    picks the first. A GSDML like the SINAMICS S120 holds many variants
+    (CBE20 / CU320-2 PN / CU310-2 PN across firmware versions)."""
     from profinet.gsdml import load_gsdml   # profinet-py (GPL-3.0)
 
-    id2name, (vendor_name, device_name, vendor_id, device_id), bitmap, sub_items = \
-        _extract_names_and_identity(path)
+    (id2name, (vendor_name, device_name, vendor_id, device_id),
+     bitmap, sub_items, daps) = _extract_names_and_identity(path)
 
     dev = load_gsdml(path)
     if vendor_id == 0:
@@ -332,7 +398,7 @@ def parse_gsdml(path: str) -> GSDMLDevice:
         modules.append(ModuleInfo(ident=1, name="Default Module",
                                   submodules=telegrams))
 
-    return GSDMLDevice(
+    dev_out = GSDMLDevice(
         path=path,
         vendor_name=vendor_name,
         device_name=device_name,
@@ -340,7 +406,13 @@ def parse_gsdml(path: str) -> GSDMLDevice:
         device_id=device_id,
         modules=modules,
         bitmap_data=bitmap,
+        daps=daps,
     )
+    if daps:
+        want = dap_id if (dap_id and any(d.id == dap_id for d in daps)) else daps[0].id
+        dev_out.select_dap(want)
+        dev_out.device_name = dev_out.dap_display_name()
+    return dev_out
 
 
 def load_device_image(dev: GSDMLDevice, size=(64, 64)):

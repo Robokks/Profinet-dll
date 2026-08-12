@@ -24,6 +24,7 @@ class DriveObject:
 @dataclass
 class DeviceConfig:
     gsdml_path: str = ""
+    dap_id: str = ""           # selected device variant (DeviceAccessPoint) ID
     station_name: str = ""
     ip: str = "192.168.1.50"
     subnet: str = "255.255.255.0"

@@ -42,7 +42,7 @@ class PnConfigTab(ttk.Frame):
             if not os.path.exists(cfg.gsdml_path):
                 continue
             try:
-                gsdml = parse_gsdml(cfg.gsdml_path)
+                gsdml = parse_gsdml(cfg.gsdml_path, dap_id=getattr(cfg, "dap_id", ""))
             except Exception:
                 continue
             # Add to GSDML list if not present
@@ -255,6 +255,7 @@ class PnConfigTab(ttk.Frame):
 
         cfg = existing_cfg or DeviceConfig(
             gsdml_path=gsdml.path,
+            dap_id=gsdml.selected_dap_id,
             canvas_x=x, canvas_y=y,
             module_ident=gsdml.modules[0].ident if gsdml.modules else 0,
             submodule_ident=(gsdml.modules[0].submodules[0].ident

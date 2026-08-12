@@ -108,27 +108,58 @@ class DeviceDialog(tk.Toplevel):
     def _build_general(self):
         f = ttk.LabelFrame(self._panes_host, text="General")
         pad = {"padx": 8, "pady": 5}
-        ttk.Label(f, text="Station Name:").grid(row=0, column=0, sticky="w", **pad)
+
+        # Device variant (DeviceAccessPoint) — a GSDML holds many (CBE20 /
+        # CU320-2 PN / CU310-2 PN, per firmware). Pick the one matching the
+        # physical control unit.
+        ttk.Label(f, text="Device variant:").grid(row=0, column=0, sticky="w", **pad)
+        self._dap_ids = [d.id for d in self._gsdml.daps]
+        self._dap_names = [d.name for d in self._gsdml.daps]
+        self._dap_var = tk.StringVar()
+        self._dap_combo = ttk.Combobox(f, textvariable=self._dap_var, state="readonly",
+                                       width=38, values=self._dap_names)
+        self._dap_combo.grid(row=0, column=1, columnspan=2, sticky="w", **pad)
+        self._dap_combo.bind("<<ComboboxSelected>>", self._on_dap_change)
+        if not self._dap_ids:
+            self._dap_combo.configure(state="disabled")
+            self._dap_var.set("(no variants in GSDML)")
+
+        ttk.Label(f, text="Station Name:").grid(row=1, column=0, sticky="w", **pad)
         self._name_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._name_var, width=32).grid(row=0, column=1, **pad)
-        ttk.Button(f, text="Scan Network", command=self._on_scan).grid(row=0, column=2, **pad)
-        ttk.Label(f, text="IP Address:").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Entry(f, textvariable=self._name_var, width=32).grid(row=1, column=1, **pad)
+        ttk.Button(f, text="Scan Network", command=self._on_scan).grid(row=1, column=2, **pad)
+        ttk.Label(f, text="IP Address:").grid(row=2, column=0, sticky="w", **pad)
         self._ip_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._ip_var, width=20).grid(row=1, column=1, sticky="w", **pad)
-        ttk.Label(f, text="Subnet Mask:").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Entry(f, textvariable=self._ip_var, width=20).grid(row=2, column=1, sticky="w", **pad)
+        ttk.Label(f, text="Subnet Mask:").grid(row=3, column=0, sticky="w", **pad)
         self._subnet_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._subnet_var, width=20).grid(row=2, column=1, sticky="w", **pad)
-        ttk.Label(f, text="Gateway:").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Entry(f, textvariable=self._subnet_var, width=20).grid(row=3, column=1, sticky="w", **pad)
+        ttk.Label(f, text="Gateway:").grid(row=4, column=0, sticky="w", **pad)
         self._gw_var = tk.StringVar()
-        ttk.Entry(f, textvariable=self._gw_var, width=20).grid(row=3, column=1, sticky="w", **pad)
-        ttk.Label(f, text="MAC:").grid(row=4, column=0, sticky="w", **pad)
+        ttk.Entry(f, textvariable=self._gw_var, width=20).grid(row=4, column=1, sticky="w", **pad)
+        ttk.Label(f, text="MAC:").grid(row=5, column=0, sticky="w", **pad)
         self._mac_var = tk.StringVar()
         self._mac_entry = ttk.Entry(f, textvariable=self._mac_var, width=22, state="readonly")
-        self._mac_entry.grid(row=4, column=1, sticky="w", **pad)
+        self._mac_entry.grid(row=5, column=1, sticky="w", **pad)
         self._scan_status = tk.StringVar(value="")
         ttk.Label(f, textvariable=self._scan_status, foreground="gray").grid(
-            row=5, column=0, columnspan=3, sticky="w", **pad)
+            row=6, column=0, columnspan=3, sticky="w", **pad)
         return f
+
+    def _on_dap_change(self, _e=None):
+        idx = self._dap_combo.current()
+        if not (0 <= idx < len(self._dap_ids)):
+            return
+        self._cfg.dap_id = self._dap_ids[idx]
+        self._gsdml.select_dap(self._cfg.dap_id)
+        # Suggest the variant's default DNS station name if none set yet.
+        if not self._name_var.get().strip():
+            dns = self._gsdml.dap_dns_name(self._cfg.dap_id)
+            if dns:
+                self._name_var.set(dns)
+        self._refresh_rack()
+        if hasattr(self, "_info_variant_var"):
+            self._info_variant_var.set(self._gsdml.dap_display_name(self._cfg.dap_id))
 
     # ── Modules pane (rack + details) ────────────────────────────────────────
     def _build_modules(self):
@@ -172,15 +203,24 @@ class DeviceDialog(tk.Toplevel):
 
     def _build_device_info(self):
         f = ttk.LabelFrame(self._panes_host, text="Device Info")
+        self._info_variant_var = tk.StringVar(
+            value=self._gsdml.dap_display_name(getattr(self._cfg, "dap_id", "")))
         rows = [
-            ("Device name", self._gsdml.device_name),
+            ("Device family", self._gsdml.vendor_name and self._gsdml.device_name
+                              or self._gsdml.device_name),
             ("Vendor name", self._gsdml.vendor_name or "—"),
             ("Vendor ID", f"0x{self._gsdml.vendor_id:04X}"),
             ("Device ID", f"0x{self._gsdml.device_id:04X}"),
+            ("Variants in GSDML", str(len(self._gsdml.daps))),
             ("Modules in catalog", str(len(self._gsdml.modules))),
             ("GSDML file", os.path.basename(self._gsdml.path)),
         ]
-        for i, (k, v) in enumerate(rows):
+        # Selected device variant — dynamic (updates when the combobox changes).
+        ttk.Label(f, text="Selected variant:", width=20, anchor="w").grid(
+            row=0, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(f, textvariable=self._info_variant_var, foreground="blue").grid(
+            row=0, column=1, sticky="w", padx=8, pady=4)
+        for i, (k, v) in enumerate(rows, start=1):
             ttk.Label(f, text=k + ":", width=20, anchor="w").grid(row=i, column=0, sticky="w", padx=8, pady=4)
             ttk.Label(f, text=v, foreground="blue").grid(row=i, column=1, sticky="w", padx=8, pady=4)
         return f
@@ -245,9 +285,10 @@ class DeviceDialog(tk.Toplevel):
 
     def _refresh_rack(self):
         self._rack_tv.delete(*self._rack_tv.get_children())
+        head = self._gsdml.dap_display_name(getattr(self._cfg, "dap_id", ""))
         self._rack_tv.insert("", "end", text="Slot 0:  <Access Point>", values=("", ""))
         self._rack_tv.insert("", "end",
-                             text=f"Slot 1:  {self._gsdml.device_name} [head]", values=("", ""))
+                             text=f"Slot 1:  {head} [head]", values=("", ""))
         for i, d in enumerate(self._rack):
             pid = self._rack_tv.insert("", "end", iid=f"do{i}",
                                        text=f"Slot {d.slot}:  {d.module_name or '(module)'}",
@@ -352,6 +393,12 @@ class DeviceDialog(tk.Toplevel):
     # ── identity + scan ──────────────────────────────────────────────────────
     def _load_identity(self):
         c = self._cfg
+        # Device variant: pick the saved one, else the GSDML's default (first).
+        if self._dap_ids:
+            did = c.dap_id if c.dap_id in self._dap_ids else self._dap_ids[0]
+            c.dap_id = did
+            self._gsdml.select_dap(did)
+            self._dap_combo.current(self._dap_ids.index(did))
         self._name_var.set(c.station_name)
         self._ip_var.set(c.ip)
         self._subnet_var.set(c.subnet)
@@ -409,6 +456,9 @@ class DeviceDialog(tk.Toplevel):
                                  f"IP address '{ip}' is not valid (use 4 numbers).", parent=self)
             return
         c = self._cfg
+        idx = self._dap_combo.current()
+        if 0 <= idx < len(self._dap_ids):
+            c.dap_id = self._dap_ids[idx]
         c.station_name = self._name_var.get().strip()
         c.ip = ip
         c.subnet = self._subnet_var.get().strip() or "255.255.255.0"
