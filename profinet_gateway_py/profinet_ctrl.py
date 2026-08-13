@@ -468,7 +468,11 @@ class ProfinetCtrl:
         try:
             from profinet.rpc import PNAlarmCRBlockReq as A
             props = int(os.environ.get("PN_ALARM_PROPS", "0"), 0)
-            maxdata = int(os.environ.get("PN_ALARM_MAXDATA", "200"), 0)
+            # S120 rejects the AlarmCR at field 6 even with PNIO's VFD value of
+            # 200; an S120 carries far more alarm data, so declare the spec max
+            # (1432) by default. Field 6 is either MaxAlarmDataLength (S120
+            # 0-based field numbering) or AlarmCRProperties — this disambiguates.
+            maxdata = int(os.environ.get("PN_ALARM_MAXDATA", "1432"), 0)
             rtatf = int(os.environ.get("PN_ALARM_RTATF", "2"), 0)
             rtar = int(os.environ.get("PN_ALARM_RTAR", "3"), 0)
             alarm_ref = int(os.environ.get("PN_ALARM_REF", "2"), 0)
