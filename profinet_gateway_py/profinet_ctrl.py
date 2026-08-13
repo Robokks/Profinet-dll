@@ -216,6 +216,7 @@ class ProfinetCtrl:
         cap = self._rpc_capture_begin()
         self._patch_ar_startup()
         self._patch_iocr()
+        self._patch_expected_submodule()
         try:
             from profinet import dcp, rpc
             from profinet.rt import build_iocr_configs
@@ -424,6 +425,39 @@ class ProfinetCtrl:
         except Exception as e:
             self._log(f"[PN] WARN: could not set Advanced startup ({e})")
 
+    def _patch_expected_submodule(self):
+        """Emit one ExpectedSubmoduleBlockReq per module, matching Siemens' PN
+        Driver (PNIO.dll). profinet-py packs every module into a single block
+        with NumberOfAPIs=N (repeating API=0); the S120 rejects that at field 5
+        (API). PNIO sends a separate block per module (DAP, then each drive
+        object), each NumberOfAPIs=1. Patch to_bytes to split accordingly."""
+        try:
+            import profinet.rpc as _r
+            if getattr(_r, "_exp_submod_patched", False):
+                return
+            cls = _r.ExpectedSubmoduleBlockReq
+            orig = cls.to_bytes
+
+            def patched(self):
+                if len(self.apis) <= 1:
+                    return orig(self)
+                saved = self.apis
+                out = b""
+                try:
+                    for entry in saved:
+                        self.apis = [entry]     # one module -> one block
+                        out += orig(self)
+                finally:
+                    self.apis = saved
+                return out
+
+            cls.to_bytes = patched
+            _r._exp_submod_patched = True
+            self._log("[PN] ExpectedSubmodule: one block per module "
+                      "(matches Siemens PN Driver)")
+        except Exception as e:
+            self._log(f"[PN] WARN: could not adjust ExpectedSubmodule ({e})")
+
     def _patch_iocr(self):
         """Match the IOCR block's RT class + FrameID range to Siemens' PN Driver
         (PNIO.dll). profinet-py declares RT_CLASS_1 (IOCRProperties=0x01) with a
@@ -481,11 +515,10 @@ class ProfinetCtrl:
         """
         try:
             from profinet.rpc import PNAlarmCRBlockReq as A
-            # Field 6 (AlarmCRProperties) is the confirmed reject: the S120
-            # refuses 0 (PNIO's VFD value). Valid values are 0/1/2/3
-            # (bit0=Priority, bit1=Transport). Try 1 (Priority) first; env can
-            # sweep 2 (Transport=UDP) / 3.
-            props = self._envint("PN_ALARM_PROPS", 1)
+            # AlarmCRProperties: the S120 (IRT-commissioned) requires 0x0002 =
+            # Transport RTA-over-UDP (confirmed: 0 and 1 rejected at field 6,
+            # 2 accepted). profinet-py then uses LT=0x0800 for the AlarmCR.
+            props = self._envint("PN_ALARM_PROPS", 2)
             # S120 rejects the AlarmCR at field 6 even with PNIO's VFD value of
             # 200; an S120 carries far more alarm data, so declare the spec max
             # (1432) by default. Field 6 is either MaxAlarmDataLength (S120
