@@ -214,6 +214,7 @@ class ProfinetCtrl:
             return False
         conn = ctrl = None
         cap = self._rpc_capture_begin()
+        self._patch_ar_startup()
         try:
             from profinet import dcp, rpc
             from profinet.rt import build_iocr_configs
@@ -366,38 +367,75 @@ class ProfinetCtrl:
         0x1C01001B: "nca_s_wrong_kind_of_bindings",
     }
 
-    def _patch_alarm_cr(self, conn):
-        """Adjust the AR's AlarmCR block to values a real SINAMICS accepts.
-        profinet-py sends bare minimums (RTATimeoutFactor=1, RTARetries=3,
-        MaxAlarmDataLength=200, AlarmCRProperties=0) that the drive rejects
-        (Connect error AlarmCR). Every field is overridable by env var so the
-        working combination can be found without recompiling:
+    def _patch_ar_startup(self):
+        """Set ARProperties StartupMode = Advanced (bit 30) and the CMInitiator
+        activity-timeout to 200, matching Siemens' own PN Driver (PNIO.dll).
+        profinet-py hardcodes ARProperties=0x00000011 (Legacy startup) and
+        timeout=100; a real SINAMICS S120 V5.x needs Advanced startup, and in
+        Legacy mode it rejects the AR (surfacing as an AlarmCR error). Patch the
+        module-global PNARBlockRequest so connect() emits the Advanced value.
 
-          PN_ALARM_PROPS    AlarmCRProperties (default 0; bit0=priority, bit1=transport)
-          PN_ALARM_MAXDATA  MaxAlarmDataLength (default 1432 = spec max)
-          PN_ALARM_RTATF    RTATimeoutFactor   (default 1)
-          PN_ALARM_RTAR     RTARetries         (default 3)
+          PN_AR_STARTUP=legacy   to force Legacy (default advanced)
+        """
+        try:
+            import profinet.rpc as _r
+            if getattr(_r, "_ar_startup_patched", False):
+                return
+            if os.environ.get("PN_AR_STARTUP", "advanced").lower() == "legacy":
+                return
+            orig = _r.PNARBlockRequest
+
+            def wrapped(*a, **k):
+                a = list(a)
+                if len(a) > 6 and isinstance(a[6], int):
+                    a[6] = a[6] | 0x40000000          # ARProperties: Advanced startup
+                elif "ar_properties" in k:
+                    k["ar_properties"] = k["ar_properties"] | 0x40000000
+                if len(a) > 7 and isinstance(a[7], int):
+                    a[7] = 0x00C8                       # CMInitiatorActivityTimeoutFactor=200
+                return orig(*a, **k)
+
+            wrapped.fmt_size = orig.fmt_size            # connect() reads this
+            _r.PNARBlockRequest = wrapped
+            _r._ar_startup_patched = True
+            self._log("[PN] AR startup mode = Advanced (ARProperties bit30), "
+                      "activity-timeout=200 (matches Siemens PN Driver)")
+        except Exception as e:
+            self._log(f"[PN] WARN: could not set Advanced startup ({e})")
+
+    def _patch_alarm_cr(self, conn):
+        """Match the AlarmCR block to Siemens' PN Driver (PNIO.dll), which
+        connects to these drives successfully. Captured working values:
+        AlarmCRProperties=0, RTATimeoutFactor=2, RTARetries=3,
+        LocalAlarmReference=2, MaxAlarmDataLength=200. profinet-py's defaults
+        differ (RTATimeoutFactor=1, LocalAlarmReference=1). Overridable by env:
+
+          PN_ALARM_PROPS   AlarmCRProperties  (default 0)
+          PN_ALARM_MAXDATA MaxAlarmDataLength (default 200, matching PNIO.dll)
+          PN_ALARM_RTATF   RTATimeoutFactor   (default 2, matching PNIO.dll)
+          PN_ALARM_RTAR    RTARetries         (default 3)
+          PN_ALARM_REF     LocalAlarmReference(default 2, matching PNIO.dll)
         """
         try:
             from profinet.rpc import PNAlarmCRBlockReq as A
             props = int(os.environ.get("PN_ALARM_PROPS", "0"), 0)
-            maxdata = int(os.environ.get("PN_ALARM_MAXDATA", "1432"), 0)
-            rtatf = int(os.environ.get("PN_ALARM_RTATF",
-                        str(A.DEFAULT_RTA_TIMEOUT_FACTOR)), 0)
-            rtar = int(os.environ.get("PN_ALARM_RTAR",
-                       str(A.DEFAULT_RTA_RETRIES)), 0)
-            # These are read at build time from the class, so patching them here
-            # changes what _build_alarm_cr_block() emits.
+            maxdata = int(os.environ.get("PN_ALARM_MAXDATA", "200"), 0)
+            rtatf = int(os.environ.get("PN_ALARM_RTATF", "2"), 0)
+            rtar = int(os.environ.get("PN_ALARM_RTAR", "3"), 0)
+            alarm_ref = int(os.environ.get("PN_ALARM_REF", "2"), 0)
+            # These are read at build time from the class/instance, so setting
+            # them here changes what _build_alarm_cr_block() emits.
             A.DEFAULT_MAX_ALARM_DATA_LENGTH = maxdata
             A.DEFAULT_RTA_TIMEOUT_FACTOR = rtatf
             A.DEFAULT_RTA_RETRIES = rtar
+            conn._alarm_ref = alarm_ref                 # LocalAlarmReference
             priority = props & 0x1
             transport = (props >> 1) & 0x1
             orig = conn._build_alarm_cr_block
             conn._build_alarm_cr_block = (
                 lambda t=transport, p=priority: orig(t, p))
             self._log(f"[PN] AlarmCR: props=0x{props:04X} maxdata={maxdata} "
-                      f"rtatf={rtatf} rtar={rtar}")
+                      f"rtatf={rtatf} rtar={rtar} ref={alarm_ref}")
         except Exception as e:
             self._log(f"[PN] WARN: could not adjust AlarmCR block ({e})")
 
