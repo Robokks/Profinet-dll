@@ -257,9 +257,9 @@ class ProfinetCtrl:
             # IOCR timing. Defaults are profinet-py's (1ms send clock, 8x
             # reduction). Env-overridable so we can match the drive's engineered
             # send clock if it rejects on timing (PNIO.dll used 128/16, wd=3).
-            sc = int(os.environ.get("PN_SEND_CLOCK", str(_SEND_CLOCK_FACTOR)), 0)
-            rr = int(os.environ.get("PN_REDUCTION", str(_CYCLE_MS)), 0)
-            wd = int(os.environ.get("PN_WATCHDOG", str(_WATCHDOG_FACTOR)), 0)
+            sc = self._envint("PN_SEND_CLOCK", _SEND_CLOCK_FACTOR)
+            rr = self._envint("PN_REDUCTION", _CYCLE_MS)
+            wd = self._envint("PN_WATCHDOG", _WATCHDOG_FACTOR)
             setup = rpc.IOCRSetup(slots=io_slots,
                                   send_clock_factor=sc,
                                   reduction_ratio=rr,
@@ -374,6 +374,20 @@ class ProfinetCtrl:
         0x1C01001B: "nca_s_wrong_kind_of_bindings",
     }
 
+    @staticmethod
+    def _envint(name, default):
+        """Parse an integer env var, tolerating trailing junk (e.g. when several
+        KEY=VALUE pairs get pasted into one PyCharm field). Takes the first
+        whitespace/';'-separated token; supports 0x hex."""
+        v = os.environ.get(name)
+        if v is None or not v.strip():
+            return default
+        tok = v.strip().replace(";", " ").split()[0]
+        try:
+            return int(tok, 0)
+        except ValueError:
+            return default
+
     def _patch_ar_startup(self):
         """Set ARProperties StartupMode = Advanced (bit 30) and the CMInitiator
         activity-timeout to 200, matching Siemens' own PN Driver (PNIO.dll).
@@ -426,11 +440,11 @@ class ProfinetCtrl:
             import profinet.rpc as _r
             if getattr(_r, "_iocr_patched", False):
                 return
-            rtclass = int(os.environ.get("PN_IOCR_RTCLASS", "2"), 0)
+            rtclass = self._envint("PN_IOCR_RTCLASS", 2)
             if rtclass == 1:
                 return  # RT_CLASS_1 is profinet-py's own default
-            fid_in = int(os.environ.get("PN_IOCR_FRAMEID_IN", "0xBBF2"), 0)
-            fid_out = int(os.environ.get("PN_IOCR_FRAMEID_OUT", "0xFFFF"), 0)
+            fid_in = self._envint("PN_IOCR_FRAMEID_IN", 0xBBF2)
+            fid_out = self._envint("PN_IOCR_FRAMEID_OUT", 0xFFFF)
             orig = _r.PNIOCRBlockReqHeader
 
             def wrapped(*a, **k):
@@ -467,15 +481,15 @@ class ProfinetCtrl:
         """
         try:
             from profinet.rpc import PNAlarmCRBlockReq as A
-            props = int(os.environ.get("PN_ALARM_PROPS", "0"), 0)
+            props = self._envint("PN_ALARM_PROPS", 0)
             # S120 rejects the AlarmCR at field 6 even with PNIO's VFD value of
             # 200; an S120 carries far more alarm data, so declare the spec max
             # (1432) by default. Field 6 is either MaxAlarmDataLength (S120
             # 0-based field numbering) or AlarmCRProperties — this disambiguates.
-            maxdata = int(os.environ.get("PN_ALARM_MAXDATA", "1432"), 0)
-            rtatf = int(os.environ.get("PN_ALARM_RTATF", "2"), 0)
-            rtar = int(os.environ.get("PN_ALARM_RTAR", "3"), 0)
-            alarm_ref = int(os.environ.get("PN_ALARM_REF", "2"), 0)
+            maxdata = self._envint("PN_ALARM_MAXDATA", 1432)
+            rtatf = self._envint("PN_ALARM_RTATF", 2)
+            rtar = self._envint("PN_ALARM_RTAR", 3)
+            alarm_ref = self._envint("PN_ALARM_REF", 2)
             # These are read at build time from the class/instance, so setting
             # them here changes what _build_alarm_cr_block() emits.
             A.DEFAULT_MAX_ALARM_DATA_LENGTH = maxdata
