@@ -481,7 +481,11 @@ class ProfinetCtrl:
         """
         try:
             from profinet.rpc import PNAlarmCRBlockReq as A
-            props = self._envint("PN_ALARM_PROPS", 0)
+            # Field 6 (AlarmCRProperties) is the confirmed reject: the S120
+            # refuses 0 (PNIO's VFD value). Valid values are 0/1/2/3
+            # (bit0=Priority, bit1=Transport). Try 1 (Priority) first; env can
+            # sweep 2 (Transport=UDP) / 3.
+            props = self._envint("PN_ALARM_PROPS", 1)
             # S120 rejects the AlarmCR at field 6 even with PNIO's VFD value of
             # 200; an S120 carries far more alarm data, so declare the spec max
             # (1432) by default. Field 6 is either MaxAlarmDataLength (S120
