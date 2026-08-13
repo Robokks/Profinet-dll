@@ -215,6 +215,7 @@ class ProfinetCtrl:
         conn = ctrl = None
         cap = self._rpc_capture_begin()
         self._patch_ar_startup()
+        self._patch_iocr()
         try:
             from profinet import dcp, rpc
             from profinet.rt import build_iocr_configs
@@ -253,11 +254,17 @@ class ProfinetCtrl:
             # carry no cyclic data).
             ds.dos = do_map
             ds.slot, ds.subslot = do_map[0][0], do_map[0][1]
+            # IOCR timing. Defaults are profinet-py's (1ms send clock, 8x
+            # reduction). Env-overridable so we can match the drive's engineered
+            # send clock if it rejects on timing (PNIO.dll used 128/16, wd=3).
+            sc = int(os.environ.get("PN_SEND_CLOCK", str(_SEND_CLOCK_FACTOR)), 0)
+            rr = int(os.environ.get("PN_REDUCTION", str(_CYCLE_MS)), 0)
+            wd = int(os.environ.get("PN_WATCHDOG", str(_WATCHDOG_FACTOR)), 0)
             setup = rpc.IOCRSetup(slots=io_slots,
-                                  send_clock_factor=_SEND_CLOCK_FACTOR,
-                                  reduction_ratio=_CYCLE_MS,
-                                  watchdog_factor=_WATCHDOG_FACTOR,
-                                  data_hold_factor=_WATCHDOG_FACTOR)
+                                  send_clock_factor=sc,
+                                  reduction_ratio=rr,
+                                  watchdog_factor=wd,
+                                  data_hold_factor=wd)
 
             # The RPC ObjectUUID's instance number (ObjectUUID_LocalIndex) is 1
             # by convention, but PROFIdrive profile devices (SINAMICS) can
@@ -402,6 +409,48 @@ class ProfinetCtrl:
                       "activity-timeout=200 (matches Siemens PN Driver)")
         except Exception as e:
             self._log(f"[PN] WARN: could not set Advanced startup ({e})")
+
+    def _patch_iocr(self):
+        """Match the IOCR block's RT class + FrameID range to Siemens' PN Driver
+        (PNIO.dll). profinet-py declares RT_CLASS_1 (IOCRProperties=0x01) with a
+        0xC000-range FrameID; the SINAMICS rejects that (Connect IOCR error,
+        ErrorCode2=7 = IOCRProperties). PNIO uses RT_CLASS_2 (0x02) with input
+        FrameID in the 0x8000-0xBBFF range and output FrameID 0xFFFF
+        (device-assigned). RT class and FrameID range are coupled, so patch both.
+
+          PN_IOCR_RTCLASS      RT class 1/2/3   (default 2)
+          PN_IOCR_FRAMEID_IN   input FrameID    (default 0xBBF2)
+          PN_IOCR_FRAMEID_OUT  output FrameID   (default 0xFFFF)
+        """
+        try:
+            import profinet.rpc as _r
+            if getattr(_r, "_iocr_patched", False):
+                return
+            rtclass = int(os.environ.get("PN_IOCR_RTCLASS", "2"), 0)
+            if rtclass == 1:
+                return  # RT_CLASS_1 is profinet-py's own default
+            fid_in = int(os.environ.get("PN_IOCR_FRAMEID_IN", "0xBBF2"), 0)
+            fid_out = int(os.environ.get("PN_IOCR_FRAMEID_OUT", "0xFFFF"), 0)
+            orig = _r.PNIOCRBlockReqHeader
+
+            def wrapped(*a, **k):
+                if "iocr_properties" in k:
+                    k["iocr_properties"] = (k["iocr_properties"] & ~0xF) | (rtclass & 0xF)
+                itype = k.get("iocr_type")
+                if itype == 1:       # input CR (device -> controller)
+                    k["frame_id"] = fid_in
+                elif itype == 2:     # output CR (controller -> device)
+                    k["frame_id"] = fid_out
+                return orig(*a, **k)
+
+            for attr in ("fmt_size", "BLOCK_TYPE"):
+                setattr(wrapped, attr, getattr(orig, attr))
+            _r.PNIOCRBlockReqHeader = wrapped
+            _r._iocr_patched = True
+            self._log(f"[PN] IOCR: RT_CLASS_{rtclass}, FrameID in=0x{fid_in:04X} "
+                      f"out=0x{fid_out:04X} (matches Siemens PN Driver)")
+        except Exception as e:
+            self._log(f"[PN] WARN: could not adjust IOCR block ({e})")
 
     def _patch_alarm_cr(self, conn):
         """Match the AlarmCR block to Siemens' PN Driver (PNIO.dll), which
