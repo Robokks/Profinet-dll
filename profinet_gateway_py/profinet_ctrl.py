@@ -244,7 +244,7 @@ class ProfinetCtrl:
         self._patch_cyclic_iocs()
         try:
             from profinet import dcp, rpc
-            from profinet.rt import build_iocr_configs
+            from profinet.rt import build_iocr_configs, IOXS_GOOD
             from profinet.cyclic import CyclicController
             from profinet.util import ethernet_socket, get_mac, s2mac
 
@@ -363,6 +363,17 @@ class ProfinetCtrl:
             ctrl = CyclicController(self._adapter, src, s2mac(info.mac),
                                     in_cfg, out_cfg,
                                     max_consecutive_timeouts=0)
+            # Assert consumer status GOOD from the very first output frame, as
+            # the cifX does (its frame #1 already carries lead IOCS + telegram
+            # IOCS = 0x80). profinet-py leaves IOCS at 0x00 (BAD) until it has
+            # received an input frame, so our first frames tell the drive
+            # "consumer not ready" — the S120 sends two provisional input frames
+            # (data_status 0x35), never sees us acknowledge its data, and aborts
+            # its provider instead of going operational (data_status 0x15). The
+            # RX path re-affirms GOOD on every received frame; this just makes
+            # the startup frames match the cifX. (IOPS is already GOOD from the
+            # controller's constructor.)
+            ctrl._output_builder.set_all_iocs(IOXS_GOOD)
             ctrl.start()
 
             # 4. Complete the AR handshake now that RT frames are already flowing.
