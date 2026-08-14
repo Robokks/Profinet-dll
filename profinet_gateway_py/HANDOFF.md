@@ -104,3 +104,58 @@ ethertype 0x8892 frameID 0x8000. Match our emitted bytes to these.
 - Commit trailer used:
   `Co-Authored-By: Claude <noreply@anthropic.com>` and a `Claude-Session:` line.
 - Do NOT open a PR unless asked.
+
+## GOLDEN REFERENCE — cifX → OUR S120 (192.168.140.2) Connect, verbatim bytes
+The working Connect our request must match byte-for-byte (controller-specific
+fields — AR ARUUID, CMInitiatorMac `00:02:a2:a5:ea:d1`, CMInitiatorObjectUUID,
+station name "controller" — will differ and that's fine). Block order below is
+the exact wire order.
+
+```
+[ARBlockReq]  (ARProperties 0x40000011 Advanced, timeout 0x00c8=200)
+01 01 00 40 01 00 00 01 0e 92 d4 be 36 81 4a 4f ac f0 c9 02 62 2d 46 32 00 00
+00 02 a2 a5 ea d1 de a0 00 00 6c 97 11 d1 82 71 00 00 02 03 01 1e 40 00 00 11
+00 c8 88 92 00 0a 63 6f 6e 74 72 6f 6c 6c 65 72
+
+[IOCRBlockReq input]  (type1, ref 0x1000, RT_CLASS_2, datalen 0x48, FrameID 0x8000, sendclk 0x20, reduc 0x10, wd/hold 0x03, 2 APIs)
+01 02 00 6a 01 00 00 01 10 00 88 92 00 00 00 02 00 48 80 00 00 20 00 10 00 01
+00 00 ff ff ff ff 00 03 00 03 c0 00 00 00 00 00 00 00 00 02 00 00 00 00 00 04
+00 00 00 01 00 00 00 00 80 00 00 01 00 00 80 01 00 02 00 00 80 02 00 03 00 00
+00 00 3a 00 00 03 00 01 00 01 00 04 00 01 00 02 00 05 00 01 00 03 00 06 00 01
+00 01 00 03 00 47
+
+[IOCRBlockReq output]  (type2, ref 0x2000, FrameID 0xffff)
+01 02 00 6a 01 00 00 02 20 00 88 92 00 00 00 02 00 48 ff ff 00 20 00 10 00 01
+00 00 ff ff ff ff 00 03 00 03 c0 00 00 00 00 00 00 00 00 02 00 00 00 00 00 00
+00 04 00 00 00 01 00 00 00 00 80 00 00 01 00 00 80 01 00 02 00 00 80 02 00 03
+00 00 3a 00 00 01 00 01 00 03 00 06 00 03 00 01 00 01 00 04 00 01 00 02 00 05
+00 01 00 03 00 47
+
+[ExpectedSubmoduleBlockReq DAP]  (API 0, slot 0, module 0x0002030d, 4 submods)
+01 04 00 4a 01 00 00 01 00 00 00 00 00 00 00 02 03 0d 00 00 00 04 00 01 00 00
+00 02 00 00 00 01 00 00 01 01 80 00 00 00 00 03 00 00 00 01 00 00 01 01 80 01
+00 00 00 04 00 00 00 01 00 00 01 01 80 02 00 00 00 05 00 00 00 01 00 00 01 01
+
+[ExpectedSubmoduleBlockReq drive]  (API 0x00003a00, slot 1, module 0x300100c4;
+  submods: subslot1 MAP 0xffff, subslot2 empty 0x1388, subslot3 telegram 0x400003e6 64/64)
+01 04 00 42 01 00 00 01 00 00 3a 00 00 01 30 01 00 c4 00 00 00 03 00 01 00 00
+ff ff 00 00 00 01 00 00 01 01 00 02 00 00 13 88 00 00 00 01 00 00 01 01 00 03
+40 00 03 e6 00 03 00 01 00 40 01 01 00 02 00 40 01 01
+
+[AlarmCRBlockReq]  (Layer-2 LT 0x8892, props 0, rtatf 1, rtar 3, ref 0, maxdata 0x00c8=200)  — comes LAST
+01 03 00 16 01 00 00 01 88 92 00 00 00 00 00 01 00 03 00 00 00 c8 c0 00 a0 00
+```
+
+### Cyclic (RT) frames — ethertype 0x8892
+- Drive → controller (INPUT): FrameID **0x8000**
+- Controller → drive (OUTPUT): FrameID **0x8000**
+- Frame body: FrameID(2) + C_SDU payload(72) + cycle_counter(2) + data_status(1)
+  + transfer_status(1). Our output frame layout (72 B): telegram output data at
+  offset 6..69, IOPS byte 70, IOCS byte 71; DAP/MAP/empty IOCS at 0..5. Input
+  frame is the mirror (telegram input data at offset 6).
+
+## Uploaded pcaps (user can re-upload on request)
+- `40c2501a-hilscher_data.pcapng` — **cifX → our S120** (the golden reference above).
+- `bede648c-py_.pcapng` — our profinet-py app's own attempt (for diffing).
+- Earlier: `13de5802-profinet_py.pcapng`, `pniot111.pcap`/`pniot1231.pcap`
+  (Siemens PNIO.dll to VFDs incl. an S120 at 192.168.161.11, DeviceID 0x0501).
