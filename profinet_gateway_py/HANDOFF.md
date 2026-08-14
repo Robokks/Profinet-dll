@@ -74,6 +74,19 @@ _CYCLIC_VLAN_TCI      = 0xC000       # 802.1Q PCP=6 VID=0 on cyclic frames
 ```
 Cyclic-specific env overrides: `PN_CYCLIC_VLAN=0` sends untagged frames again,
 `PN_CYCLIC_VLAN_TCI` changes the tag.
+
+### Trying both RT classes — `PN_CYCLIC_MODE`
+One switch flips the whole coherent config so both approaches can be tested
+without hand-setting six vars (`_cyclic_profile`):
+- `PN_CYCLIC_MODE=rtc2` (default) — **matches the cifX→our-S120 capture**:
+  RT_CLASS_2, IOCR FrameID in=0x8000/out=0xFFFF, cyclic FrameID 0x8000 both
+  ways, 802.1Q-tagged. First choice (the drive's commissioned config).
+- `PN_CYCLIC_MODE=rtc1` — **unsynchronised RT_CLASS_1 fallback** a pure-software
+  master can drive without a PTCP sync domain: RT_CLASS_1, FrameID 0xC000 both
+  ways, tagged. Try this if rtc2 keeps aborting after ~2 frames (RTC2 hardware
+  sync). Add `PN_CYCLIC_VLAN=0` to also drop the tag (untagged RT_CLASS_1).
+Any individual `PN_*` var still overrides a single field. The active mode is
+logged at connect: `[PN] Cyclic mode = RTC2 …`.
 Everything is also overridable by `PN_*` env vars (parsed by `_envint`, which
 tolerates junk). **IMPORTANT for testing: make sure NO leftover `PN_*` env vars
 are set in the PyCharm run config** — they override the constants and caused

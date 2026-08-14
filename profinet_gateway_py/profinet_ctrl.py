@@ -237,6 +237,9 @@ class ProfinetCtrl:
             return False
         conn = ctrl = None
         cap = self._rpc_capture_begin()
+        _prof = self._cyclic_profile()
+        self._log(f"[PN] Cyclic mode = {_prof['mode'].upper()} "
+                  f"(PN_CYCLIC_MODE; rtc2=cifX match, rtc1=unsynced fallback)")
         self._patch_ar_startup()
         self._patch_iocr()
         self._patch_expected_submodule()
@@ -446,6 +449,32 @@ class ProfinetCtrl:
         except ValueError:
             return default
 
+    def _cyclic_profile(self):
+        """Coherent cyclic presets so BOTH RT classes can be tried by flipping a
+        single env var instead of six. `PN_CYCLIC_MODE` selects:
+
+          rtc2 (default) — matches the cifX -> our-S120 capture exactly:
+            RT_CLASS_2, IOCR FrameIDs in=0x8000 / out=0xFFFF, cyclic FrameID
+            0x8000 both ways, 802.1Q-tagged. This is the drive's commissioned
+            config and our first choice.
+          rtc1 — unsynchronised RT_CLASS_1 fallback that a pure-software master
+            can actually drive (no PTCP sync domain needed): RT_CLASS_1,
+            FrameID 0xC000 both ways (declared and on the wire), still tagged.
+            Try this if the drive keeps aborting the RTC2 exchange after a
+            couple of frames (the RT_CLASS_2 hardware-sync wall).
+
+        Any individual PN_* var below still overrides the matching field, so
+        e.g. `PN_CYCLIC_MODE=rtc1 PN_CYCLIC_VLAN=0` runs untagged RT_CLASS_1.
+        """
+        mode = (os.environ.get("PN_CYCLIC_MODE") or "rtc2").strip().lower()
+        if mode in ("rtc1", "rt1", "1", "class1", "rtclass1"):
+            return dict(mode="rtc1", rtclass=1,
+                        iocr_fid_in=0xC000, iocr_fid_out=0xC000,
+                        cyc_fid_in=0xC000, cyc_fid_out=0xC000, vlan=1)
+        return dict(mode="rtc2", rtclass=2,
+                    iocr_fid_in=0x8000, iocr_fid_out=0xFFFF,
+                    cyc_fid_in=0x8000, cyc_fid_out=0x8000, vlan=1)
+
     def _patch_ar_startup(self):
         """Set ARProperties StartupMode = Advanced (bit 30) and the CMInitiator
         activity-timeout to 200, matching Siemens' own PN Driver (PNIO.dll).
@@ -589,10 +618,11 @@ class ProfinetCtrl:
                               watchdog_factor=_WATCHDOG_FACTOR,
                               data_length=dlen, objects=io)
 
-        # RT_CLASS_2 cyclic FrameIDs are engineered (0x8000 both ways for this
-        # drive), not the values returned by the Connect response. Force them.
-        fid_in = self._envint("PN_CYCLIC_FRAMEID_IN", _CYCLIC_FRAME_ID_IN)
-        fid_out = self._envint("PN_CYCLIC_FRAMEID_OUT", _CYCLIC_FRAME_ID_OUT)
+        # Cyclic FrameIDs are engineered (not the Connect-response values); the
+        # active profile picks them (rtc2: 0x8000 both ways, rtc1: 0xC000).
+        prof = self._cyclic_profile()
+        fid_in = self._envint("PN_CYCLIC_FRAMEID_IN", prof["cyc_fid_in"])
+        fid_out = self._envint("PN_CYCLIC_FRAMEID_OUT", prof["cyc_fid_out"])
         # The input config must carry ONLY the IODataObjects. profinet-py's RX
         # path keys received data by (slot, subslot), so adding the input-CR
         # IOCS entries — which share (1,3) with the telegram — would overwrite
@@ -601,7 +631,7 @@ class ProfinetCtrl:
         in_cfg = cfg(1, 1, fid_in, in_objs, [], in_len)
         out_cfg = cfg(2, 2, fid_out, out_objs, out_iocs, out_len)
         self._log(f"[PN] Cyclic FrameID in=0x{fid_in:04X} out=0x{fid_out:04X} "
-                  f"(engineered, from cifX capture)")
+                  f"(mode {prof['mode']})")
         return in_cfg, out_cfg
 
     def _patch_cyclic_vlan(self):
@@ -630,9 +660,34 @@ class ProfinetCtrl:
             import struct as _st
             import profinet.cyclic as _c
             from profinet.cyclic import CyclicController
+            prof = self._cyclic_profile()
             tci = self._envint("PN_CYCLIC_VLAN_TCI", _CYCLIC_VLAN_TCI)
-            if not self._envint("PN_CYCLIC_VLAN", 1):
-                self._log("[PN] Cyclic VLAN tagging disabled (PN_CYCLIC_VLAN=0)")
+            if not self._envint("PN_CYCLIC_VLAN", prof["vlan"]):
+                self._log("[PN] Cyclic VLAN tagging disabled (PN_CYCLIC_VLAN=0); "
+                          "RX still strips tags if the drive sends them")
+                # RX-only patches still help (capture-all + tolerate tags), but
+                # skip the TX tag so we emit bare 0x8892 frames.
+                if not getattr(_c, "_vlan_patched", False):
+                    orig_rx = CyclicController._process_input_frame
+
+                    def rx_untag0(self, data, _o=orig_rx):
+                        if (len(data) >= 18 and data[12] == 0x81
+                                and data[13] == 0x00):
+                            data = data[:12] + data[16:]
+                        return _o(self, data)
+
+                    orig_sock = CyclicController._create_raw_socket
+
+                    def sock_all0(self, timeout=None, _o=orig_sock):
+                        from profinet.util import ethernet_socket
+                        s = ethernet_socket(self.interface, None)
+                        if timeout is not None:
+                            s.settimeout(timeout)
+                        return s
+
+                    CyclicController._process_input_frame = rx_untag0
+                    CyclicController._create_raw_socket = sock_all0
+                    _c._vlan_patched = True
                 return
             # (3) TX: emit an 802.1Q header in place of the bare ethertype.
             _c._ETHERTYPE_PROFINET_BYTES = (b"\x81\x00" + _st.pack(">H", tci)
@@ -717,10 +772,11 @@ class ProfinetCtrl:
             import profinet.rpc as _r
             if getattr(_r, "_iocr_patched", False):
                 return
+            prof = self._cyclic_profile()
             drive_api = self._envint("PN_DRIVE_API", 0x00003A00)
-            rtclass = self._envint("PN_IOCR_RTCLASS", _IOCR_RT_CLASS)
-            fid_in = self._envint("PN_IOCR_FRAMEID_IN", 0x8000)
-            fid_out = self._envint("PN_IOCR_FRAMEID_OUT", 0xFFFF)
+            rtclass = self._envint("PN_IOCR_RTCLASS", prof["rtclass"])
+            fid_in = self._envint("PN_IOCR_FRAMEID_IN", prof["iocr_fid_in"])
+            fid_out = self._envint("PN_IOCR_FRAMEID_OUT", prof["iocr_fid_out"])
             api_of = lambda slot: 0 if slot == 0 else drive_api
 
             def build(self, iocr_type, iocr_reference, setup):
@@ -761,9 +817,9 @@ class ProfinetCtrl:
 
             _r.RPCCon._build_iocr_block = build
             _r._iocr_patched = True
-            self._log(f"[PN] IOCR: RT_CLASS_{rtclass}, drive data under API "
-                      f"0x{drive_api:04X}, standard RT frame layout "
-                      f"(matches cifX/real S120)")
+            self._log(f"[PN] IOCR: mode {prof['mode']} RT_CLASS_{rtclass}, "
+                      f"declared FrameID in=0x{fid_in:04X} out=0x{fid_out:04X}, "
+                      f"drive data under API 0x{drive_api:04X}")
         except Exception as e:
             self._log(f"[PN] WARN: could not replace IOCR builder ({e})")
 
