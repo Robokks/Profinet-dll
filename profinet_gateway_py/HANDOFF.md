@@ -47,6 +47,10 @@ monkeypatch in `profinet_ctrl.py` (methods `_patch_*`), applied per-connect in
 | Block order | AR,IOCR,IOCR,AlarmCR,ExpSubmod | **AR,IOCR,IOCR,ExpSubmod,ExpSubmod,AlarmCR** | `_patch_alarm_cr` (deferral trick) |
 | Cyclic frame layout | offset-0, 71 bytes | **72-byte, telegram at offset 6**, matches IOCR | `_build_iocr_configs` |
 | Cyclic FrameID | from Connect response | **forced 0x8000 both directions** (engineered) | `_build_iocr_configs`, constants `_CYCLIC_FRAME_ID_IN/OUT` |
+| **Cyclic VLAN tag** | none (bare 0x8892), RX socket filtered on 0x8892, RX parser rejects 0x8100 | **802.1Q tag 0x8100 TCI 0xC000** on TX; RX socket unfiltered (ETH_P_ALL) + tag stripped before parse | `_patch_cyclic_vlan`, constant `_CYCLIC_VLAN_TCI` |
+| **Input-CR IOCS objects** | added, and collide on `(1,3)` | **omitted from the input config** (RX keys by slot/subslot; the IOCS entry overwrote the 64 data bytes with `b""`) | `_build_iocr_configs` |
+| **IOCS at frame offset 0** | never written (`if iocs_offset > 0`) | **written** — key IOCS objects off `data_length == 0` | `_patch_cyclic_iocs` |
+| **Watchdog FAULT** | stops sending output frames | **`max_consecutive_timeouts=0`** — never FAULT, keep providing outputs | `configure_device` |
 
 ### Hardcoded constants (top of `profinet_ctrl.py`) — all for THIS drive
 ```
@@ -57,7 +61,10 @@ _INCLUDE_EMPTY_SUBMOD = 1
 _ALARM_CR_PROPERTIES  = 0            # Layer-2
 _IOCR_RT_CLASS        = 2            # RT_CLASS_2
 _CYCLIC_FRAME_ID_IN   = 0x8000       _CYCLIC_FRAME_ID_OUT = 0x8000
+_CYCLIC_VLAN_TCI      = 0xC000       # 802.1Q PCP=6 VID=0 on cyclic frames
 ```
+Cyclic-specific env overrides: `PN_CYCLIC_VLAN=0` sends untagged frames again,
+`PN_CYCLIC_VLAN_TCI` changes the tag.
 Everything is also overridable by `PN_*` env vars (parsed by `_envint`, which
 tolerates junk). **IMPORTANT for testing: make sure NO leftover `PN_*` env vars
 are set in the PyCharm run config** — they override the constants and caused
@@ -73,31 +80,53 @@ confusion (e.g. a stale `PN_ALARM_PROPS=2`).
   `pn_io_error_code2` tables (e.g. EC1=4/EC2=5 = ExpectedSubmodule/API).
 
 ## What to do next (current task)
-1. **Test the FrameID fix** (just pushed, commit "force cyclic FrameID 0x8000").
-   Run (as admin, no PN_* env vars). Expect log
-   `[PN] Cyclic FrameID in=0x8000 out=0x8000`.
-2. Check **IO Diagnostic**: does `ZSW1` read a real value (e.g. 0x0E31/0xEF31)
-   and does STARTER's "cyclic connection interrupted" alarm clear?
-3. If data flows: test writing STW1 (0x047E→0x047F) + NSOLL and confirm the
-   drive responds. Then the LabVIEW→TCP→gateway→drive path is complete.
-4. If still 0x0000 / interrupted, remaining suspects, in order:
-   - **RT frame data-status / cycle-counter** handling in
-     `profinet.cyclic.CyclicController` (send clock 32 / reduction 16). Compare
-     our sent RT frames vs the cifX's cyclic frames in `hilscher_data.pcapng`
-     (frame data-status byte, cycle counter step, timing).
-   - **RT_CLASS_2 needs a sync domain** — a pure software master can't do
-     hardware IRT sync; the drive may require synchronized frames. This is the
-     fundamental risk. If unsynchronized RT_CLASS_2 won't carry data, the
-     realistic path is driving the cifX hardware from Python instead.
-   - Verify our IOPS bytes are GOOD in the sent output frame and that we send at
-     ~16ms with low jitter (the app's bridge loop showed max 37ms jitter — the
-     profinet CyclicController has its own tx loop; check it isn't starved).
+The FrameID-0x8000 fix was tested and was **not** sufficient: the AR connected
+("cyclic running") but IO Diagnostic still showed ZSW1/NIST 0x0000 and the log
+showed `Watchdog: 3 consecutive timeouts, entering FAULT state`. Diffing our
+frames against the cifX capture found the real cause — **the cyclic frames are
+802.1Q VLAN-tagged** — plus three related defects. All four are now fixed and
+verified offline (our emitted output frame matches the cifX golden frame
+byte-for-byte in framing; a golden tagged input frame decodes to real ZSW1/NIST):
+
+1. `_patch_cyclic_vlan` — TX tagged 0x8100/TCI 0xC000; RX socket unfiltered so
+   tagged frames are delivered; tag stripped before parsing (untagged still OK).
+2. `_build_iocr_configs` — input config no longer carries IOCS objects that
+   collided on `(1,3)` and blanked the 64 data bytes.
+3. `_patch_cyclic_iocs` — IOCS at frame offset 0 is now written (was stuck BAD).
+4. `max_consecutive_timeouts=0` — a watchdog blip no longer stops TX.
+
+**Next: run it on the drive** (as admin, no `PN_*` env vars, SYCON offline).
+Expect the new log lines `[PN] Cyclic frames 802.1Q-tagged TCI=0xC000 …` and
+`[PN] Cyclic IOCS: offset-0 consumer status now written`.
+1. Does `ZSW1` read a real value (e.g. 0x0E31/0xEF31) and does STARTER's
+   "PN: cyclic connection interrupted" alarm clear?
+2. If yes: write STW1 (0x047E→0x047F) + NSOLL and confirm the drive responds —
+   that completes the LabVIEW→TCP→gateway→drive path.
+3. If inputs still read 0x0000, capture our own traffic and check, in order:
+   - Are our frames actually tagged on the wire, and does the drive send tagged
+     frames back? (Filter `vlan && eth.type==0x8892`.) If the drive sends
+     untagged, set `PN_CYCLIC_VLAN=0`.
+   - Is anything arriving at all on FrameID 0x8000 from `00:1f:f8:ad:9f:ac`?
+     If not, the drive is not providing — re-check the AR/PrmEnd/AppReady.
+   - **RT_CLASS_2 sync domain** — a pure software master can't do hardware IRT
+     sync. This remains the fundamental risk; if unsynchronized RT_CLASS_2 will
+     not carry data, the realistic path is driving the cifX from Python.
+   - Timing: we send at 16 ms; the bridge loop showed max ~27 ms jitter. The
+     CyclicController has its own TX thread — confirm it isn't starved.
 
 ## Verifying against the reference capture
 Parse `hilscher_data.pcapng` (pcapng, little-endian). The cifX MAC is
-`00:02:a2:a5:ea:d1`, drive `00:1f:f8:ad:9f:ac`. The Connect is a UDP/34964
-DCE-RPC REQUEST (opnum 0) to 192.168.140.2, 562 bytes; cyclic frames are
-ethertype 0x8892 frameID 0x8000. Match our emitted bytes to these.
+`00:02:a2:a5:ea:d1`, our S120 `00:1f:f8:ad:9f:ac`. The Connect is a UDP/34964
+DCE-RPC REQUEST (opnum 0) to 192.168.140.2, 562 bytes.
+
+**The capture contains TWO devices** — our S120 and a **Festo** drive
+`00:0e:f0:ab:30:df` (which uses FrameID 0x8001). Always filter on our S120's MAC
+or you will read the wrong device's frames. Our case is the single S120 only.
+
+Cyclic frames are **VLAN-tagged**: outer ethertype 0x8100, inner 0x8892,
+FrameID 0x8000, 96 bytes on the wire. In Wireshark:
+`vlan && eth.addr==00:1f:f8:ad:9f:ac`. Note pcapng EPB packet data starts at
+block-body offset 20.
 
 ## Git / workflow
 - Commit + push to `claude/profinet-dll-labview-bHem9` only.
@@ -146,13 +175,29 @@ ff ff 00 00 00 01 00 00 01 01 00 02 00 00 13 88 00 00 00 01 00 00 01 01 00 03
 01 03 00 16 01 00 00 01 88 92 00 00 00 00 00 01 00 03 00 00 00 c8 c0 00 a0 00
 ```
 
-### Cyclic (RT) frames — ethertype 0x8892
-- Drive → controller (INPUT): FrameID **0x8000**
-- Controller → drive (OUTPUT): FrameID **0x8000**
-- Frame body: FrameID(2) + C_SDU payload(72) + cycle_counter(2) + data_status(1)
-  + transfer_status(1). Our output frame layout (72 B): telegram output data at
-  offset 6..69, IOPS byte 70, IOCS byte 71; DAP/MAP/empty IOCS at 0..5. Input
-  frame is the mirror (telegram input data at offset 6).
+### Cyclic (RT) frames — VLAN-tagged, ethertype 0x8100 → 0x8892
+Verified directly against `hilscher_data.pcapng`, filtered to OUR S120
+(`00:1f:f8:ad:9f:ac`; the capture also contains a **Festo** drive
+`00:0e:f0:ab:30:df` — ignore it). Every FrameID-0x8000 frame in **both**
+directions is **802.1Q priority-tagged**, 96 bytes on the wire:
+
+```
+dst(6) src(6) 8100 C000 8892 | FrameID(2) | C_SDU(72) | cycle(2) ds(1) ts(1)
+                  ^^^^ TCI: PCP=6, VID=0  (= the declared IOCRTagHeader 0xC000)
+```
+- Counts in the capture: cifX→S120 tagged ×1904, S120→cifX tagged ×953. Zero
+  untagged 0x8000 frames. **This was the bug that kept inputs at 0x0000**:
+  profinet-py opened the RX socket filtered on `ether proto 0x8892` and its
+  parser bailed on ethertype 0x8100, so every input frame was discarded, and it
+  sent untagged frames the drive's consumer ignored → "cyclic connection
+  interrupted".
+- Golden OUTPUT C_SDU: `80 80 80 80 80 80` (six IOCS) + telegram[6..69] +
+  IOPS@70=0x80 + IOCS@71=0x80. data_status **0x35**, transfer_status 0x00.
+- Golden INPUT C_SDU: `40 40 40 40 40 40` + telegram[6..69] + IOPS@70=0x40 +
+  IOCS@71=0x80. (0x40 = GOOD at *slot* level; 0x80 = GOOD at subslot level —
+  both are "good", the drive just reports at a different hierarchy level.)
+- cycle_counter steps by SCF*RR = 32*16 = **512** per frame; profinet-py already
+  does this correctly.
 
 ## Uploaded pcaps (user can re-upload on request)
 - `40c2501a-hilscher_data.pcapng` — **cifX → our S120** (the golden reference above).

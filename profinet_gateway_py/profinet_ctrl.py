@@ -50,6 +50,11 @@ _IOCR_RT_CLASS        = 2            # RT_CLASS_2
 # (drive->controller and controller->drive). We must send AND listen on these.
 _CYCLIC_FRAME_ID_IN   = 0x8000       # drive -> controller (input)
 _CYCLIC_FRAME_ID_OUT  = 0x8000       # controller -> drive (output)
+# The S120's cyclic RT frames are 802.1Q priority-tagged in BOTH directions
+# (VLAN ethertype 0x8100, TCI 0xC000 = PCP 6 / VID 0), as the cifX capture shows
+# and as the declared IOCRTagHeader 0xC000 requires. A software master must send
+# tagged frames and receive tagged frames, or the drive's consumer times out.
+_CYCLIC_VLAN_TCI      = 0xC000       # 802.1Q TCI: PCP=6, CFI=0, VID=0
 
 
 # ── Result / state containers (shapes the UI reads) ──────────────────────────
@@ -235,6 +240,8 @@ class ProfinetCtrl:
         self._patch_ar_startup()
         self._patch_iocr()
         self._patch_expected_submodule()
+        self._patch_cyclic_vlan()
+        self._patch_cyclic_iocs()
         try:
             from profinet import dcp, rpc
             from profinet.rt import build_iocr_configs
@@ -339,8 +346,15 @@ class ProfinetCtrl:
             #    misalign the data / drop the AR.
             in_cfg, out_cfg = self._build_iocr_configs(
                 io_slots, result.input_frame_id, result.output_frame_id)
+            # max_consecutive_timeouts=0 -> never enter FAULT. profinet-py stops
+            # transmitting output frames in FAULT, which makes a missing-input
+            # blip self-perpetuating: the drive stops getting our frames, drops
+            # the AR and raises "cyclic connection interrupted". A controller
+            # must keep providing outputs even when inputs are late. The timeout
+            # counters are still tracked and shown in the stats.
             ctrl = CyclicController(self._adapter, src, s2mac(info.mac),
-                                    in_cfg, out_cfg)
+                                    in_cfg, out_cfg,
+                                    max_consecutive_timeouts=0)
             ctrl.start()
 
             ds.conn = conn
@@ -556,11 +570,116 @@ class ProfinetCtrl:
         # drive), not the values returned by the Connect response. Force them.
         fid_in = self._envint("PN_CYCLIC_FRAMEID_IN", _CYCLIC_FRAME_ID_IN)
         fid_out = self._envint("PN_CYCLIC_FRAMEID_OUT", _CYCLIC_FRAME_ID_OUT)
-        in_cfg = cfg(1, 1, fid_in, in_objs, in_iocs, in_len)
+        # The input config must carry ONLY the IODataObjects. profinet-py's RX
+        # path keys received data by (slot, subslot), so adding the input-CR
+        # IOCS entries — which share (1,3) with the telegram — would overwrite
+        # the 64 bytes of real process data with an empty slice and ZSW1/NIST
+        # would read 0x0000. IOCS only ever has to be *sent*, in the output CR.
+        in_cfg = cfg(1, 1, fid_in, in_objs, [], in_len)
         out_cfg = cfg(2, 2, fid_out, out_objs, out_iocs, out_len)
         self._log(f"[PN] Cyclic FrameID in=0x{fid_in:04X} out=0x{fid_out:04X} "
                   f"(engineered, from cifX capture)")
         return in_cfg, out_cfg
+
+    def _patch_cyclic_vlan(self):
+        """Make profinet-py's cyclic path 802.1Q-aware.
+
+        The S120 exchanges its RT frames priority-tagged in both directions
+        (0x8100, TCI 0xC000 = PCP 6 / VID 0) — that is what the declared
+        IOCRTagHeader 0xC000 asks for, and the cifX capture shows every
+        FrameID-0x8000 frame on the wire tagged, 96 bytes. profinet-py's cyclic
+        module predates VLAN support and breaks in three separate places, so
+        untagged frames go out (the drive's consumer times out -> "cyclic
+        connection interrupted") and every tagged frame coming back is dropped
+        (inputs stay 0x0000). Patch all three:
+
+          1. the RX socket is opened filtered on ether proto 0x8892, which
+             excludes 0x8100 frames before Python ever sees them — open the
+             cyclic sockets unfiltered (ETH_P_ALL) instead;
+          2. _process_input_frame reads the ethertype at offset 12 and bails
+             out on 0x8100 — strip the 4-byte tag before it parses;
+          3. frames are built with a bare 0x8892 ethertype — emit
+             0x8100 + TCI + 0x8892 instead.
+
+        PN_CYCLIC_VLAN=0 disables tagging (falls back to untagged frames).
+        """
+        try:
+            import struct as _st
+            import profinet.cyclic as _c
+            from profinet.cyclic import CyclicController
+            tci = self._envint("PN_CYCLIC_VLAN_TCI", _CYCLIC_VLAN_TCI)
+            if not self._envint("PN_CYCLIC_VLAN", 1):
+                self._log("[PN] Cyclic VLAN tagging disabled (PN_CYCLIC_VLAN=0)")
+                return
+            # (3) TX: emit an 802.1Q header in place of the bare ethertype.
+            _c._ETHERTYPE_PROFINET_BYTES = (b"\x81\x00" + _st.pack(">H", tci)
+                                            + b"\x88\x92")
+            if not getattr(_c, "_vlan_patched", False):
+                # (2) RX: strip the tag so the stock parser sees a plain frame.
+                orig_rx = CyclicController._process_input_frame
+
+                def rx_untag(self, data, _o=orig_rx):
+                    if (len(data) >= 18 and data[12] == 0x81
+                            and data[13] == 0x00):
+                        data = data[:12] + data[16:]
+                    return _o(self, data)
+
+                # (1) sockets: unfiltered, so tagged frames are delivered.
+                orig_sock = CyclicController._create_raw_socket
+
+                def sock_all(self, timeout=None, _o=orig_sock):
+                    from profinet.util import ethernet_socket
+                    sock = ethernet_socket(self.interface, None)
+                    if timeout is not None:
+                        sock.settimeout(timeout)
+                    return sock
+
+                CyclicController._process_input_frame = rx_untag
+                CyclicController._create_raw_socket = sock_all
+                _c._vlan_patched = True
+            self._log(f"[PN] Cyclic frames 802.1Q-tagged TCI=0x{tci:04X} "
+                      f"(PCP={(tci >> 13) & 7}, VID={tci & 0xFFF}); RX accepts "
+                      f"tagged + untagged (matches cifX)")
+        except Exception as e:
+            self._log(f"[PN] WARN: could not enable cyclic VLAN tagging ({e})")
+
+    def _patch_cyclic_iocs(self):
+        """Let the IOCS byte at frame offset 0 be set.
+
+        profinet-py guards every IOCS write with `if obj.iocs_offset > 0`, so
+        the consumer status at offset 0 — slot 0's first sub-module in our
+        output CR — is never written and stays 0x00 (BAD). The drive reads that
+        as "controller is not consuming my data". The cifX sends 0x80 for all
+        six leading IOCS bytes. Key IOCS-carrying objects off data_length == 0
+        (how _build_iocr_configs marks them) instead of a truthy offset."""
+        try:
+            from profinet.rt import CyclicDataBuilder as B, IOXS_GOOD
+            if getattr(B, "_iocs0_patched", False):
+                return
+
+            def set_iocs(self, slot, subslot, status=IOXS_GOOD):
+                for obj in self.config.objects:
+                    if obj.slot == slot and obj.subslot == subslot:
+                        if obj.data_length == 0:
+                            with self._write_lock:
+                                self._write_buffer[obj.iocs_offset] = status
+                                self._dirty = True
+                        return
+
+            def set_all_iocs(self, status=IOXS_GOOD):
+                with self._write_lock:
+                    for obj in self.config.objects:
+                        if obj.data_length == 0:
+                            self._write_buffer[obj.iocs_offset] = status
+                    self._dirty = True
+
+            B.set_iocs = set_iocs
+            B.set_all_iocs = set_all_iocs
+            B._iocs0_patched = True
+            self._log("[PN] Cyclic IOCS: offset-0 consumer status now written "
+                      "(all IOCS good, matches cifX)")
+        except Exception as e:
+            self._log(f"[PN] WARN: could not patch cyclic IOCS handling ({e})")
 
     def _patch_iocr(self):
         """Replace profinet-py's IOCR block builder so the IOCR matches the real
