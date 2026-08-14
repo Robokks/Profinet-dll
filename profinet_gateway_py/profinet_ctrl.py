@@ -327,11 +327,13 @@ class ProfinetCtrl:
             conn.prm_end()
             conn.application_ready()
 
-            # 3. Cyclic controller
-            in_cfg, out_cfg = build_iocr_configs(
-                io_slots, result.input_frame_id, result.output_frame_id,
-                send_clock_factor=_SEND_CLOCK_FACTOR, reduction_ratio=_CYCLE_MS,
-                watchdog_factor=_WATCHDOG_FACTOR)
+            # 3. Cyclic controller — build the frame layout ourselves so the
+            #    cyclic frame matches the IOCR we declared to the device
+            #    (telegram data at frame offset 6, 72-byte frame). profinet-py's
+            #    build_iocr_configs uses its own (offset-0) layout and would
+            #    misalign the data / drop the AR.
+            in_cfg, out_cfg = self._build_iocr_configs(
+                io_slots, result.input_frame_id, result.output_frame_id)
             ctrl = CyclicController(self._adapter, src, s2mac(info.mac),
                                     in_cfg, out_cfg)
             ctrl.start()
@@ -519,6 +521,35 @@ class ProfinetCtrl:
                 out_iocs.append((s.slot, s.subslot, off)); off += 1
         out_len = max(40, off)
         return in_objs, in_iocs, in_len, out_objs, out_iocs, out_len
+
+    def _build_iocr_configs(self, slots, in_frame_id, out_frame_id):
+        """Build the cyclic IOCRConfigs matching the IOCR we declared to the
+        device (same _iocr_layout): telegram data at frame offset 6, IOPS/IOCS
+        placed to make a 72-byte frame. Returns (input_cfg, output_cfg)."""
+        from profinet.rt import IOCRConfig, IODataObject
+        (in_objs, in_iocs, in_len, out_objs, out_iocs,
+         out_len) = self._iocr_layout(slots)
+
+        def cfg(iocr_type, ref, frame_id, objs, iocs, dlen):
+            io = []
+            for (sl, ss, off, dl) in objs:
+                io.append(IODataObject(slot=sl, subslot=ss, frame_offset=off,
+                                       data_length=dl, iops_offset=off + dl,
+                                       iocs_offset=0))
+            for (sl, ss, off) in iocs:
+                io.append(IODataObject(slot=sl, subslot=ss, frame_offset=0,
+                                       data_length=0, iops_offset=0,
+                                       iocs_offset=off))
+            return IOCRConfig(iocr_type=iocr_type, iocr_reference=ref,
+                              frame_id=frame_id,
+                              send_clock_factor=_SEND_CLOCK_FACTOR,
+                              reduction_ratio=_CYCLE_MS, phase=1,
+                              watchdog_factor=_WATCHDOG_FACTOR,
+                              data_length=dlen, objects=io)
+
+        in_cfg = cfg(1, 1, in_frame_id, in_objs, in_iocs, in_len)
+        out_cfg = cfg(2, 2, out_frame_id, out_objs, out_iocs, out_len)
+        return in_cfg, out_cfg
 
     def _patch_iocr(self):
         """Replace profinet-py's IOCR block builder so the IOCR matches the real
