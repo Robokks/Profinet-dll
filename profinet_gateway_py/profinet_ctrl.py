@@ -674,19 +674,25 @@ class ProfinetCtrl:
             do_map = []
             for i, d in enumerate(dos):
                 slot = i + 1
-                mid = mod_id_by_ident.get(d.module_ident)
-                tel = sub_id_by_ident.get(d.submodule_ident)
+                # A CU320-2 PN on its ONBOARD interface uses the '_INT' module/
+                # telegram variants (e.g. IDM_VECTOR_51_INT 0x300100C4 /
+                # IDS_TEL998_INT1 0x400003E6), not the CBE20 ones the dialog may
+                # have picked. Override the idents to match the drive's real
+                # commissioned config (from the cifX capture).
+                m_ident = self._envint("PN_DRIVE_MODULE", d.module_ident)
+                t_ident = self._envint("PN_DRIVE_TELEGRAM", d.submodule_ident)
+                mid = mod_id_by_ident.get(m_ident)
+                tel = sub_id_by_ident.get(t_ident)
                 if mid is None or tel is None:
                     raise RuntimeError(
-                        f"module 0x{d.module_ident:08X}/telegram "
-                        f"0x{d.submodule_ident:08X} not found in GSDML")
+                        f"module 0x{m_ident:08X}/telegram "
+                        f"0x{t_ident:08X} not found in GSDML")
                 slot_assignment[slot] = mid
                 sa = {3: tel}
-                # The captured real S120 Connect (Siemens PN Driver) declares
-                # only MAP (sub-slot 1) + telegram (sub-slot 3) for a drive
-                # object — no 'empty sub-module' at sub-slot 2. Set
-                # PN_INCLUDE_EMPTY=1 to restore the SYCON-style filler.
-                if self._envint("PN_INCLUDE_EMPTY", 0):
+                # The real S120 Connect (cifX capture) includes the 'empty
+                # sub-module' (0x1388) at sub-slot 2. Include it by default;
+                # PN_INCLUDE_EMPTY=0 drops it.
+                if self._envint("PN_INCLUDE_EMPTY", 1):
                     mod = gd.modules.get(mid)
                     allowed = getattr(mod, "allowed_subslots", {}) or {}
                     if "IDS_EMPTY" in allowed and 2 in allowed["IDS_EMPTY"]:
