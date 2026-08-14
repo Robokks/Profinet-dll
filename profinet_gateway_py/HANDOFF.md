@@ -8,46 +8,48 @@ TCP/UDP/STM. Repo: `robokks/profinet-dll`, working branch
 **`claude/profinet-dll-labview-bHem9`**. App lives in `profinet_gateway_py/`.
 Main file being worked on: **`profinet_gateway_py/profinet_ctrl.py`**.
 
-## Status — software stack COMPLETE & CORRECT; blocked by the drive's mandatory RT_CLASS_2 sync
-Everything a software master controls is now proven right against two working
-masters (cifX + Siemens PNIO.dll). The remaining wall is **hardware**: this S120,
-as commissioned, requires **RT_CLASS_2 with a sync domain (PTCP)** that a pure
-software master cannot provide. Both software paths are now exhausted:
+## Status — NO hardware wall; a fixable gap in profinet-py's post-Connect AR lifecycle
+**Correction to an earlier wrong conclusion.** There is **no RT_CLASS_2 sync
+requirement blocking us.** Proof:
+- The **cifX capture of OUR exact drive** (`00:1f:f8:ad:9f:ac`) contains **0 PTCP
+  sync frames and 0 alarm frames**, yet sustains 1900+ cyclic frames. Our drive
+  does NOT need sync.
+- **Siemens' own PNIO.dll** (pniot111.pcap) drives an S120 with **0 PTCP sync,
+  0 alarms** — a **pure-software** stack over WinPcap. The public
+  `SEWProfinetLabview` project + Siemens' "SINAMICS G/S: PROFINET Connection with
+  LabVIEW" guide do exactly this with **no hardware card**. Software PROFINET →
+  SINAMICS is a solved, supported thing.
 
-- **RTC2 (matches the cifX exactly):** Connect ✅, AR ✅. Our cyclic frames are
-  byte-for-byte the cifX (VLAN-tagged, FrameID 0x8000, 96 B, data_status 0x35,
-  IOCS 0x80 from frame #1). Captures show the drive **accepts our frames and
-  ramps its provider up** (IOPS/IOCS 00→40→80, real **ZSW1=0x4000** decoded)
-  — then, right at the ramp→operational transition (ds 0x35→0x15), it sends an
-  **RTA ERR-PDU (FrameID 0xFE01)** and tears down: STARTER logs
-  `1980: PN: cyclic connection interrupted`. It aborts in <1 cycle, i.e. at the
-  **sync check**, not a slow watchdog.
-- **RTC1 fallback:** **Connect REJECTED** — `IODConnectRes ErrorCode1=0x02
-  (IOCRBlockReq) ErrorCode2=0x07 (IOCRProperties/RTClass)`. The drive refuses a
-  non-RTC2 AR outright; its commissioned config mandates RT_CLASS_2.
+So RTC2-in-software is fine. What's actually happening with us:
+- **RTC2 (default):** Connect ✅, AR ✅, our cyclic frames byte-for-byte the cifX,
+  the drive **accepts them and ramps its provider up** (IOPS/IOCS 00→40→80, real
+  **ZSW1=0x4000** decoded) — then, ~3.5 ms after nearing operational, it sends an
+  **RTA ERR-PDU (FrameID 0xFE01, PNIOStatus cf 81 fd 18)** and tears down
+  (`1980: PN: cyclic connection interrupted`). It never reaches `data_status
+  0x15` (operational) the way it does with the cifX.
+- **RTC1:** Connect rejected at IOCRProperties/RTClass — THIS drive, as
+  commissioned, wants RTClass 2. Fine: RTC2 is the right mode and it's viable.
 
-**Conclusion:** a pure-Python master cannot sustain cyclic data with this drive
-as it is commissioned. RTC2 needs sub-µs-class PTCP sync (Python jitter is ~14 ms
-on a 16 ms cycle — orders of magnitude off), and RTC1 is refused. See "Paths
-forward" below.
+**The remaining bug is in the experimental profinet-py AR lifecycle AFTER
+Connect** — the ApplicationReady/CControl handshake and/or the RTA/alarm channel
+(profinet-py has an `AlarmListener` we don't wire in). The drive errs at the
+operational transition (~35 ms), far faster than an unacked-alarm retry (~300 ms),
+which points at the CControl/ApplicationReady response rather than a missing ACK.
 
-### Fixes that ARE done and verified (keep them — they're all correct)
-- VLAN tagging both ways (`_patch_cyclic_vlan`), input-IOCS collision removed,
-  offset-0 IOCS written (`_patch_cyclic_iocs`), cyclic started before
-  PrmEnd/AppReady, IOCS good from frame #1, `PN_CYCLIC_MODE` switch, and the
-  Connect-reject decoder now names the faulty block/field automatically.
+### NEXT STEP — need a full-connect capture
+Both captures so far started AFTER the RPC handshake. Capture with Wireshark
+**started BEFORE launching main.py**, filter `eth.addr==00:1f:f8:ad:9f:ac ||
+ip.addr==192.168.140.2`, so it records Connect → Write → PrmEnd(Control) →
+ApplicationReady(CControl, UDP/34964) → cyclic → the 0xFE01 abort. Compare our
+CControl exchange to a healthy one; that pinpoints the fix. Candidate fixes ready
+to try: wire up `AlarmListener` to service the alarm channel; audit
+`application_ready()`'s CControl response fields against the drive's request.
 
-## Paths forward (the drive needs to change, or use hardware)
-1. **Re-commission the drive for plain RT (RT_CLASS_1), not IRT/RTC2.** The free
-   telegram PZD-32/32 speed/torque use case does **not** need isochronous (IRT);
-   IRT was set up by the cifX engineering. If the S120's PROFINET is reconfigured
-   to standard RT (remove it from the sync domain / disable isochronous) in
-   Startdrive/TIA/SYCON, the drive should then ACCEPT our RTC1 AR — and all the
-   code above is already ready (`PN_CYCLIC_MODE=rtc1`). **Best option if the
-   drive/app allows it.**
-2. **Drive the cifX hardware from Python.** The cifX does the RTC2/IRT sync in
-   silicon; feed it process data via its host API (cifX/netX driver). Pragmatic
-   industrial fallback; the pure-Python RT path is abandoned.
+### Fixes done and verified (all correct, keep them)
+VLAN tagging both ways (`_patch_cyclic_vlan`), input-IOCS collision removed,
+offset-0 IOCS written (`_patch_cyclic_iocs`), cyclic started before
+PrmEnd/AppReady, IOCS good from frame #1, `PN_CYCLIC_MODE` switch, and the
+Connect-reject decoder now names the faulty block/field automatically.
 
 ## The device (target)
 - Drive station name `driving`, IP `192.168.140.2`, MAC `00:1f:f8:ad:9f:ac`.
