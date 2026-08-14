@@ -437,8 +437,20 @@ class ProfinetCtrl:
                 return
             cls = _r.ExpectedSubmoduleBlockReq
             orig = cls.to_bytes
+            orig_add = cls.add_submodule
+            drive_api = self._envint("PN_DRIVE_API", 0x00003A00)
 
-            def patched(self):
+            def patched_add(self, api, slot, subslot, module_ident, submodule_ident,
+                            submodule_type=0, input_length=0, output_length=0):
+                # PROFIdrive drive objects (slot >= 1) live under API 0x3A00;
+                # only the DAP/PDEV at slot 0 uses API 0. profinet-py hardcodes 0.
+                if slot != 0:
+                    api = drive_api
+                return orig_add(self, api, slot, subslot, module_ident,
+                                submodule_ident, submodule_type, input_length, output_length)
+
+            def patched_to_bytes(self):
+                # One ExpectedSubmoduleBlockReq per module (matches PN Driver).
                 if len(self.apis) <= 1:
                     return orig(self)
                 saved = self.apis
@@ -451,10 +463,11 @@ class ProfinetCtrl:
                     self.apis = saved
                 return out
 
-            cls.to_bytes = patched
+            cls.add_submodule = patched_add
+            cls.to_bytes = patched_to_bytes
             _r._exp_submod_patched = True
-            self._log("[PN] ExpectedSubmodule: one block per module "
-                      "(matches Siemens PN Driver)")
+            self._log(f"[PN] ExpectedSubmodule: one block per module, drive "
+                      f"objects under API 0x{drive_api:04X} (matches PN Driver)")
         except Exception as e:
             self._log(f"[PN] WARN: could not adjust ExpectedSubmodule ({e})")
 
@@ -669,12 +682,15 @@ class ProfinetCtrl:
                         f"0x{d.submodule_ident:08X} not found in GSDML")
                 slot_assignment[slot] = mid
                 sa = {3: tel}
-                mod = gd.modules.get(mid)
-                allowed = getattr(mod, "allowed_subslots", {}) or {}
-                # Fill sub-slot 2 with the 'empty sub-module' when the module
-                # permits it there (SINAMICS DOs, matching SYCON.net).
-                if "IDS_EMPTY" in allowed and 2 in allowed["IDS_EMPTY"]:
-                    sa[2] = "IDS_EMPTY"
+                # The captured real S120 Connect (Siemens PN Driver) declares
+                # only MAP (sub-slot 1) + telegram (sub-slot 3) for a drive
+                # object — no 'empty sub-module' at sub-slot 2. Set
+                # PN_INCLUDE_EMPTY=1 to restore the SYCON-style filler.
+                if self._envint("PN_INCLUDE_EMPTY", 0):
+                    mod = gd.modules.get(mid)
+                    allowed = getattr(mod, "allowed_subslots", {}) or {}
+                    if "IDS_EMPTY" in allowed and 2 in allowed["IDS_EMPTY"]:
+                        sa[2] = "IDS_EMPTY"
                 submodule_assignment[slot] = sa
                 do_map.append((slot, 3, d.output_length, d.input_length))
 
