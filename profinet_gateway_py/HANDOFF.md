@@ -10,9 +10,17 @@ Main file being worked on: **`profinet_gateway_py/profinet_ctrl.py`**.
 
 ## Status — WORKING through connect + AR, finishing cyclic data
 - ✅ **AR Connect established and stable** (no watchdog FAULT) to the real S120.
-- 🔵 **Cyclic data** — just fixed the last-known blocker (engineered FrameID
-  0x8000). Awaiting a test: does `ZSW1` now read a real value in IO Diagnostic
-  and does the drive's "PN: cyclic connection interrupted" alarm clear?
+- ✅ **Cyclic framing proven correct** — a capture of our own app (`py_.pcapng`)
+  shows our output frames on the wire byte-for-byte like the cifX (VLAN-tagged,
+  FrameID 0x8000, 96 B, data_status 0x35, IOCS 0x80), and the drive DID send us
+  two valid input frames (data_status 0x35).
+- 🔵 **Cyclic start ORDER** — that same capture found the real blocker: the
+  drive sent 2 input frames then aborted with a FrameID 0xFE01 alarm
+  ("1980: PN: cyclic connection interrupted") because our RT frames started
+  ~85 ms late (we started cyclic only after PrmEnd + ApplicationReady). Fixed by
+  starting the cyclic controller right after Connect. **Awaiting a test.** If it
+  still aborts, the RT_CLASS_2 sync requirement is the remaining suspect — try
+  the RT_CLASS_1 fallback (see below).
 
 ## The device (target)
 - Drive station name `driving`, IP `192.168.140.2`, MAC `00:1f:f8:ad:9f:ac`.
@@ -51,6 +59,7 @@ monkeypatch in `profinet_ctrl.py` (methods `_patch_*`), applied per-connect in
 | **Input-CR IOCS objects** | added, and collide on `(1,3)` | **omitted from the input config** (RX keys by slot/subslot; the IOCS entry overwrote the 64 data bytes with `b""`) | `_build_iocr_configs` |
 | **IOCS at frame offset 0** | never written (`if iocs_offset > 0`) | **written** — key IOCS objects off `data_length == 0` | `_patch_cyclic_iocs` |
 | **Watchdog FAULT** | stops sending output frames | **`max_consecutive_timeouts=0`** — never FAULT, keep providing outputs | `configure_device` |
+| **Cyclic start order** | cyclic started AFTER PrmEnd + ApplicationReady | **start cyclic right after Connect**, before PrmEnd/AppReady | `configure_device` |
 
 ### Hardcoded constants (top of `profinet_ctrl.py`) — all for THIS drive
 ```
@@ -95,24 +104,34 @@ byte-for-byte in framing; a golden tagged input frame decodes to real ZSW1/NIST)
 3. `_patch_cyclic_iocs` — IOCS at frame offset 0 is now written (was stuck BAD).
 4. `max_consecutive_timeouts=0` — a watchdog blip no longer stops TX.
 
+**What the `py_.pcapng` capture proved** (our app → S120, filter on the drive
+MAC `00:1f:f8:ad:9f:ac`):
+- Our OUTPUT frames: 1419 on the wire, VLAN-tagged, FrameID 0x8000, 96 B,
+  data_status 0x35 — i.e. **framing is correct**.
+- Drive INPUT frames: **only 2**, at t and t+16 ms (data_status 0x35, valid),
+  then a **FrameID 0xFE01 alarm** ~3 ms after our first output frame, then
+  silence. STARTER shows `1980: PN: cyclic connection interrupted(0)`.
+- Our stats read `frames_received=0` because those 2 drive frames arrived
+  **before** our CyclicController opened its RX socket — we started ~85 ms late.
+
 **Next: run it on the drive** (as admin, no `PN_*` env vars, SYCON offline).
-Expect the new log lines `[PN] Cyclic frames 802.1Q-tagged TCI=0xC000 …` and
-`[PN] Cyclic IOCS: offset-0 consumer status now written`.
-1. Does `ZSW1` read a real value (e.g. 0x0E31/0xEF31) and does STARTER's
-   "PN: cyclic connection interrupted" alarm clear?
+1. Does `ZSW1` read a real value (e.g. 0x0E31/0xEF31), do the Stats show
+   `frames_received` climbing, and does STARTER's "cyclic connection
+   interrupted" alarm stay clear?
 2. If yes: write STW1 (0x047E→0x047F) + NSOLL and confirm the drive responds —
    that completes the LabVIEW→TCP→gateway→drive path.
-3. If inputs still read 0x0000, capture our own traffic and check, in order:
-   - Are our frames actually tagged on the wire, and does the drive send tagged
-     frames back? (Filter `vlan && eth.type==0x8892`.) If the drive sends
-     untagged, set `PN_CYCLIC_VLAN=0`.
-   - Is anything arriving at all on FrameID 0x8000 from `00:1f:f8:ad:9f:ac`?
-     If not, the drive is not providing — re-check the AR/PrmEnd/AppReady.
-   - **RT_CLASS_2 sync domain** — a pure software master can't do hardware IRT
-     sync. This remains the fundamental risk; if unsynchronized RT_CLASS_2 will
-     not carry data, the realistic path is driving the cifX from Python.
-   - Timing: we send at 16 ms; the bridge loop showed max ~27 ms jitter. The
-     CyclicController has its own TX thread — confirm it isn't starved.
+3. If the drive STILL aborts (0xFE01 / alarm 1980) shortly after connect, this
+   is the **RT_CLASS_2 synchronization** requirement — an RTC2 provider expects
+   phase-aligned frames from a sync master (PTCP), which a software master can't
+   supply. Levers, in order:
+   - **RT_CLASS_1 fallback**: re-declare the IOCR as RTC1 — `PN_IOCR_RTCLASS=1`,
+     `PN_IOCR_FRAMEID_IN`/`_OUT` in the 0xC000 range (e.g. 0xC000), and
+     `PN_CYCLIC_FRAMEID_IN`/`_OUT` to match. RTC1 is unsynchronized and is what a
+     pure-Python master can actually drive. Risk: the S120 may reject a non-RTC2
+     Connect (it was commissioned RTC2 by the cifX) — test and read the reject.
+   - Reduce startup latency further (start RT even earlier / warm the sockets).
+   - If neither works, unsynchronized RTC2 genuinely can't carry data here and
+     the realistic path is driving the cifX hardware from Python.
 
 ## Verifying against the reference capture
 Parse `hilscher_data.pcapng` (pcapng, little-endian). The cifX MAC is

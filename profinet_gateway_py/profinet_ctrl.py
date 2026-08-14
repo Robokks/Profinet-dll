@@ -336,14 +336,22 @@ class ProfinetCtrl:
                 conn.close()
                 self._log(f"[PN] Connect failed for {dc.station_name}: no cyclic AR")
                 return False
-            conn.prm_end()
-            conn.application_ready()
-
-            # 3. Cyclic controller — build the frame layout ourselves so the
-            #    cyclic frame matches the IOCR we declared to the device
-            #    (telegram data at frame offset 6, 72-byte frame). profinet-py's
-            #    build_iocr_configs uses its own (offset-0) layout and would
-            #    misalign the data / drop the AR.
+            # 3. Start the cyclic exchange BEFORE PrmEnd/ApplicationReady.
+            #    PROFINET expects the controller's RT output frames to already be
+            #    on the wire while the AR startup handshake completes. PrmEnd and
+            #    ApplicationReady are RTA round-trips that each wait for a device
+            #    ACK (~tens of ms); profinet-py's example only starts cyclic IO
+            #    after they return. Against the real S120 that is ~85 ms too
+            #    late: the capture shows the drive send two input frames, get no
+            #    output from us in that window, then abort the cyclic connection
+            #    with a FrameID 0xFE01 alarm — STARTER logs it as
+            #    "1980: PN: cyclic connection interrupted". Starting RT flow here,
+            #    right after Connect, keeps our frames present throughout.
+            #
+            #    Build the frame layout ourselves so the cyclic frame matches the
+            #    IOCR we declared (telegram data at frame offset 6, 72-byte
+            #    frame); profinet-py's build_iocr_configs uses its own (offset-0)
+            #    layout and would misalign the data / drop the AR.
             in_cfg, out_cfg = self._build_iocr_configs(
                 io_slots, result.input_frame_id, result.output_frame_id)
             # max_consecutive_timeouts=0 -> never enter FAULT. profinet-py stops
@@ -356,6 +364,10 @@ class ProfinetCtrl:
                                     in_cfg, out_cfg,
                                     max_consecutive_timeouts=0)
             ctrl.start()
+
+            # 4. Complete the AR handshake now that RT frames are already flowing.
+            conn.prm_end()
+            conn.application_ready()
 
             ds.conn = conn
             ds.cyclic = ctrl
