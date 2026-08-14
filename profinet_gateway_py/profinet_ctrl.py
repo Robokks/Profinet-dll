@@ -33,6 +33,19 @@ _SEND_CLOCK_FACTOR = 32
 _CYCLE_MS = 8
 _WATCHDOG_FACTOR = 6
 
+# ── Connected-drive hardcoded parameters ─────────────────────────────────────
+# Values captured from the working Hilscher cifX -> real S120 Connect
+# (192.168.140.2, DeviceID 0x0501, CU320-2 PN V5.2 on the ONBOARD PN interface).
+# The drive object is DO VECTOR + Free telegram PZD-32/32, so it uses the
+# '_INT' (onboard-interface) module/telegram variants rather than the CBE20
+# ones the GSDML dialog picks. Change these if the drive's commissioned config
+# (Startdrive/SYCON) differs. Each is still overridable by the matching env var.
+_DRIVE_MODULE_IDENT   = 0x300100C4   # IDM_VECTOR_51_INT  (DO VECTOR, FW5.1+, onboard)
+_DRIVE_TELEGRAM_IDENT = 0x400003E6   # IDS_TEL998_INT1    (Free telegram PZD-32/32)
+_INCLUDE_EMPTY_SUBMOD = 1            # S120 expects the empty sub-module at sub-slot 2
+_ALARM_CR_PROPERTIES  = 2            # RTA-over-UDP (S120 is IRT-commissioned)
+_IOCR_RT_CLASS        = 2            # RT_CLASS_2
+
 
 # ── Result / state containers (shapes the UI reads) ──────────────────────────
 @dataclass
@@ -487,7 +500,7 @@ class ProfinetCtrl:
             import profinet.rpc as _r
             if getattr(_r, "_iocr_patched", False):
                 return
-            rtclass = self._envint("PN_IOCR_RTCLASS", 2)
+            rtclass = self._envint("PN_IOCR_RTCLASS", _IOCR_RT_CLASS)
             if rtclass == 1:
                 return  # RT_CLASS_1 is profinet-py's own default
             fid_in = self._envint("PN_IOCR_FRAMEID_IN", 0xBBF2)
@@ -531,7 +544,7 @@ class ProfinetCtrl:
             # AlarmCRProperties: the S120 (IRT-commissioned) requires 0x0002 =
             # Transport RTA-over-UDP (confirmed: 0 and 1 rejected at field 6,
             # 2 accepted). profinet-py then uses LT=0x0800 for the AlarmCR.
-            props = self._envint("PN_ALARM_PROPS", 2)
+            props = self._envint("PN_ALARM_PROPS", _ALARM_CR_PROPERTIES)
             # S120 rejects the AlarmCR at field 6 even with PNIO's VFD value of
             # 200; an S120 carries far more alarm data, so declare the spec max
             # (1432) by default. Field 6 is either MaxAlarmDataLength (S120
@@ -679,8 +692,8 @@ class ProfinetCtrl:
                 # IDS_TEL998_INT1 0x400003E6), not the CBE20 ones the dialog may
                 # have picked. Override the idents to match the drive's real
                 # commissioned config (from the cifX capture).
-                m_ident = self._envint("PN_DRIVE_MODULE", d.module_ident)
-                t_ident = self._envint("PN_DRIVE_TELEGRAM", d.submodule_ident)
+                m_ident = self._envint("PN_DRIVE_MODULE", _DRIVE_MODULE_IDENT)
+                t_ident = self._envint("PN_DRIVE_TELEGRAM", _DRIVE_TELEGRAM_IDENT)
                 mid = mod_id_by_ident.get(m_ident)
                 tel = sub_id_by_ident.get(t_ident)
                 if mid is None or tel is None:
@@ -692,7 +705,7 @@ class ProfinetCtrl:
                 # The real S120 Connect (cifX capture) includes the 'empty
                 # sub-module' (0x1388) at sub-slot 2. Include it by default;
                 # PN_INCLUDE_EMPTY=0 drops it.
-                if self._envint("PN_INCLUDE_EMPTY", 1):
+                if self._envint("PN_INCLUDE_EMPTY", _INCLUDE_EMPTY_SUBMOD):
                     mod = gd.modules.get(mid)
                     allowed = getattr(mod, "allowed_subslots", {}) or {}
                     if "IDS_EMPTY" in allowed and 2 in allowed["IDS_EMPTY"]:
