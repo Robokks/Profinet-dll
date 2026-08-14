@@ -43,7 +43,7 @@ _WATCHDOG_FACTOR = 3      # watchdog / data-hold factor (matches cifX)
 _DRIVE_MODULE_IDENT   = 0x300100C4   # IDM_VECTOR_51_INT  (DO VECTOR, FW5.1+, onboard)
 _DRIVE_TELEGRAM_IDENT = 0x400003E6   # IDS_TEL998_INT1    (Free telegram PZD-32/32)
 _INCLUDE_EMPTY_SUBMOD = 1            # S120 expects the empty sub-module at sub-slot 2
-_ALARM_CR_PROPERTIES  = 2            # RTA-over-UDP (S120 is IRT-commissioned)
+_ALARM_CR_PROPERTIES  = 0            # AlarmCR over Layer-2 (matches cifX->our S120)
 _IOCR_RT_CLASS        = 2            # RT_CLASS_2
 
 
@@ -598,31 +598,42 @@ class ProfinetCtrl:
         """
         try:
             from profinet.rpc import PNAlarmCRBlockReq as A
-            # AlarmCRProperties: the S120 (IRT-commissioned) requires 0x0002 =
-            # Transport RTA-over-UDP (confirmed: 0 and 1 rejected at field 6,
-            # 2 accepted). profinet-py then uses LT=0x0800 for the AlarmCR.
+            # Match the AlarmCR the cifX sends OUR S120 exactly: Layer-2
+            # (props=0, LT=0x8892), RTATimeoutFactor=1, RTARetries=3,
+            # LocalAlarmReference=0, MaxAlarmDataLength=200.
             props = self._envint("PN_ALARM_PROPS", _ALARM_CR_PROPERTIES)
-            # S120 rejects the AlarmCR at field 6 even with PNIO's VFD value of
-            # 200; an S120 carries far more alarm data, so declare the spec max
-            # (1432) by default. Field 6 is either MaxAlarmDataLength (S120
-            # 0-based field numbering) or AlarmCRProperties — this disambiguates.
-            maxdata = self._envint("PN_ALARM_MAXDATA", 1432)
-            rtatf = self._envint("PN_ALARM_RTATF", 2)
+            maxdata = self._envint("PN_ALARM_MAXDATA", 200)
+            rtatf = self._envint("PN_ALARM_RTATF", 1)
             rtar = self._envint("PN_ALARM_RTAR", 3)
-            alarm_ref = self._envint("PN_ALARM_REF", 2)
-            # These are read at build time from the class/instance, so setting
-            # them here changes what _build_alarm_cr_block() emits.
+            alarm_ref = self._envint("PN_ALARM_REF", 0)
             A.DEFAULT_MAX_ALARM_DATA_LENGTH = maxdata
             A.DEFAULT_RTA_TIMEOUT_FACTOR = rtatf
             A.DEFAULT_RTA_RETRIES = rtar
             conn._alarm_ref = alarm_ref                 # LocalAlarmReference
             priority = props & 0x1
             transport = (props >> 1) & 0x1
-            orig = conn._build_alarm_cr_block
-            conn._build_alarm_cr_block = (
-                lambda t=transport, p=priority: orig(t, p))
+            orig_alarm = conn._build_alarm_cr_block
+            orig_exp = conn._build_expected_submodule_block
+
+            # PROFINET / the S120 expects block order:
+            #   AR, IOCR, IOCR, ExpectedSubmodule..., AlarmCR
+            # profinet-py emits the AlarmCR BEFORE the ExpectedSubmodule. Defer
+            # it: _build_alarm_cr_block stores the bytes and returns nothing, and
+            # _build_expected_submodule_block appends it after the ExpSubmod
+            # blocks — so the AlarmCR ends up last, matching the cifX.
+            def deferred_alarm(t=transport, p=priority):
+                self._deferred_alarm_cr = orig_alarm(t, p)
+                return b""
+
+            def exp_then_alarm(setup):
+                data = orig_exp(setup)
+                return data + getattr(self, "_deferred_alarm_cr", b"")
+
+            conn._build_alarm_cr_block = deferred_alarm
+            conn._build_expected_submodule_block = exp_then_alarm
             self._log(f"[PN] AlarmCR: props=0x{props:04X} maxdata={maxdata} "
-                      f"rtatf={rtatf} rtar={rtar} ref={alarm_ref}")
+                      f"rtatf={rtatf} rtar={rtar} ref={alarm_ref}; block order "
+                      f"AR,IOCR,ExpSubmod,AlarmCR (matches cifX)")
         except Exception as e:
             self._log(f"[PN] WARN: could not adjust AlarmCR block ({e})")
 
