@@ -928,8 +928,26 @@ class ProfinetCtrl:
         except Exception:
             pass
 
+    # PROFINET Connect error decoding. A device that ACCEPTS the DCE/RPC call
+    # but rejects the AR replies with a RESPONSE PDU (ptype 0x02) whose body
+    # ends in a PNIOStatus: ErrorCode / ErrorDecode / ErrorCode1 / ErrorCode2.
+    # ErrorCode1 is the low byte of the faulty BlockType; ErrorCode2 is the
+    # 1-based field index inside that block (both from the Wireshark pn_io
+    # tables). This is far more useful than the connectionless reject codes.
+    _PNIO_BLOCK = {0x01: "ARBlockReq", 0x02: "IOCRBlockReq",
+                   0x03: "AlarmCRBlockReq", 0x04: "ExpectedSubmoduleBlockReq",
+                   0x05: "PrmServerBlockReq", 0x06: "MCRBlockReq"}
+    _PNIO_ERRCODE = {0xDB: "IODConnectRes", 0xDA: "IODReleaseRes",
+                     0xDE: "IODWriteRes", 0xDF: "IODReadRes", 0xCF: "RTA error"}
+    _IOCR_FIELDS = {1: "BlockType", 2: "BlockLength", 3: "BlockVersion",
+                    4: "IOCRType", 5: "IOCRReference", 6: "LT",
+                    7: "IOCRProperties (RTClass)", 8: "DataLength", 9: "FrameID",
+                    10: "SendClockFactor", 11: "ReductionRatio", 12: "Phase",
+                    13: "Sequence", 14: "FrameSendOffset", 15: "WatchdogFactor",
+                    16: "DataHoldFactor", 17: "IOCRTagHeader", 18: "NumberOfAPIs"}
+
     def _decode_reject(self, hexpart):
-        """Best-effort decode of a DCE/RPC reject PDU status code."""
+        """Best-effort decode of the device's Connect rejection."""
         try:
             b = bytes.fromhex(hexpart.replace(" ", ""))
         except Exception:
@@ -937,12 +955,32 @@ class ProfinetCtrl:
         if len(b) < 2:
             return
         ptype = b[1]
+        # ptype 0x02 = RESPONSE: the RPC call succeeded but the AR was refused;
+        # the PNIOStatus sits at the start of the NDR body (after the 80-byte
+        # connectionless header), little-endian: EC2, EC1, ErrorDecode, ErrorCode.
+        if ptype == 2 and len(b) >= 84:
+            ec2, ec1, ed, ec = b[80], b[81], b[82], b[83]
+            if ed in (0x80, 0x81) and ec in self._PNIO_ERRCODE:
+                blk = self._PNIO_BLOCK.get(ec1, f"0x{ec1:02X}")
+                fld = (self._IOCR_FIELDS.get(ec2) if ec1 == 0x02
+                       else None) or f"field {ec2}"
+                self._log(f"[PN] Connect refused: {self._PNIO_ERRCODE[ec]} "
+                          f"ErrorCode1=0x{ec1:02X} ({blk}) "
+                          f"ErrorCode2=0x{ec2:02X} ({fld})")
+                if ec1 == 0x02 and ec2 == 0x07:
+                    self._log("[PN] -> The drive REJECTED the IOCR RTClass. It "
+                              "requires RT_CLASS_2 (its commissioned IRT/sync "
+                              "config) and will not accept RT_CLASS_1. A pure-"
+                              "software master cannot provide the RTC2 sync a "
+                              "hardware master (cifX) does — see HANDOFF.md.")
+                return
+            # fall through to the raw status if unrecognised
         if ptype != 6:  # 6 = REJECT
-            self._log(f"[PN] (response packet type 0x{ptype:02X}, not a plain reject)")
+            if len(b) >= 84:
+                self._log(f"[PN] (response ptype 0x{ptype:02X}; status bytes "
+                          f"{b[80:84].hex()} — paste this line to me)")
             return
-        # Connectionless DCE/RPC header is 80 bytes; the reject body starts with
-        # a 4-byte status. Endianness follows DREP (byte 4); try both, prefer a
-        # known code.
+        # Connectionless DCE/RPC REJECT (80-byte header + 4-byte NCA status).
         if len(b) >= 84:
             le = int.from_bytes(b[80:84], "little")
             be = int.from_bytes(b[80:84], "big")
