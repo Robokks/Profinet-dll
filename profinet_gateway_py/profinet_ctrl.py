@@ -45,6 +45,11 @@ _DRIVE_TELEGRAM_IDENT = 0x400003E6   # IDS_TEL998_INT1    (Free telegram PZD-32/
 _INCLUDE_EMPTY_SUBMOD = 1            # S120 expects the empty sub-module at sub-slot 2
 _ALARM_CR_PROPERTIES  = 0            # AlarmCR over Layer-2 (matches cifX->our S120)
 _IOCR_RT_CLASS        = 2            # RT_CLASS_2
+# For RT_CLASS_2/3 the cyclic FrameIDs are engineered, not returned by the
+# Connect response. The cifX<->our-S120 capture uses 0x8000 in BOTH directions
+# (drive->controller and controller->drive). We must send AND listen on these.
+_CYCLIC_FRAME_ID_IN   = 0x8000       # drive -> controller (input)
+_CYCLIC_FRAME_ID_OUT  = 0x8000       # controller -> drive (output)
 
 
 # ── Result / state containers (shapes the UI reads) ──────────────────────────
@@ -547,8 +552,14 @@ class ProfinetCtrl:
                               watchdog_factor=_WATCHDOG_FACTOR,
                               data_length=dlen, objects=io)
 
-        in_cfg = cfg(1, 1, in_frame_id, in_objs, in_iocs, in_len)
-        out_cfg = cfg(2, 2, out_frame_id, out_objs, out_iocs, out_len)
+        # RT_CLASS_2 cyclic FrameIDs are engineered (0x8000 both ways for this
+        # drive), not the values returned by the Connect response. Force them.
+        fid_in = self._envint("PN_CYCLIC_FRAMEID_IN", _CYCLIC_FRAME_ID_IN)
+        fid_out = self._envint("PN_CYCLIC_FRAMEID_OUT", _CYCLIC_FRAME_ID_OUT)
+        in_cfg = cfg(1, 1, fid_in, in_objs, in_iocs, in_len)
+        out_cfg = cfg(2, 2, fid_out, out_objs, out_iocs, out_len)
+        self._log(f"[PN] Cyclic FrameID in=0x{fid_in:04X} out=0x{fid_out:04X} "
+                  f"(engineered, from cifX capture)")
         return in_cfg, out_cfg
 
     def _patch_iocr(self):
