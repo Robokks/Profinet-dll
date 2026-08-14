@@ -29,9 +29,9 @@ _GUID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
 # milliseconds equals reduction_ratio. 8 ms balances latency vs. Python jitter
 # (profinet-py allows >=1 ms; warns <8 ms). Lower it further only on a fast,
 # lightly loaded PC.
-_SEND_CLOCK_FACTOR = 32
-_CYCLE_MS = 8
-_WATCHDOG_FACTOR = 6
+_SEND_CLOCK_FACTOR = 32   # 32 x 31.25us = 1 ms send clock (matches cifX)
+_CYCLE_MS = 16            # reduction ratio -> 16 ms cycle (matches cifX->S120)
+_WATCHDOG_FACTOR = 3      # watchdog / data-hold factor (matches cifX)
 
 # ── Connected-drive hardcoded parameters ─────────────────────────────────────
 # Values captured from the working Hilscher cifX -> real S120 Connect
@@ -484,47 +484,104 @@ class ProfinetCtrl:
         except Exception as e:
             self._log(f"[PN] WARN: could not adjust ExpectedSubmodule ({e})")
 
-    def _patch_iocr(self):
-        """Match the IOCR block's RT class + FrameID range to Siemens' PN Driver
-        (PNIO.dll). profinet-py declares RT_CLASS_1 (IOCRProperties=0x01) with a
-        0xC000-range FrameID; the SINAMICS rejects that (Connect IOCR error,
-        ErrorCode2=7 = IOCRProperties). PNIO uses RT_CLASS_2 (0x02) with input
-        FrameID in the 0x8000-0xBBFF range and output FrameID 0xFFFF
-        (device-assigned). RT class and FrameID range are coupled, so patch both.
+    @staticmethod
+    def _iocr_layout(slots):
+        """Compute the standard PROFINET RT frame layout (matching the cifX /
+        real S120) for both directions. Returns (in_objs,in_iocs,in_len,
+        out_objs,out_iocs,out_len) where *_objs = [(slot,subslot,offset,dlen)]
+        (IODataObjects) and *_iocs = [(slot,subslot,offset)].
 
-          PN_IOCR_RTCLASS      RT class 1/2/3   (default 2)
-          PN_IOCR_FRAMEID_IN   input FrameID    (default 0xBBF2)
-          PN_IOCR_FRAMEID_OUT  output FrameID   (default 0xFFFF)
-        """
+        Input CR (device->controller): EVERY sub-module is an IODataObject
+          (its input_length data + 1 IOPS byte; 0-I/O sub-modules contribute
+          just the IOPS). Sub-modules with output get a trailing IOCS.
+        Output CR (controller->device): sub-modules with output are
+          IODataObjects; all others get an IOCS in place, then output
+          sub-modules get a trailing IOCS. profinet-py's own layout differs
+          and a real S120 rejects it."""
+        in_objs = []; in_iocs = []; off = 0
+        for s in slots:
+            in_objs.append((s.slot, s.subslot, off, s.input_length))
+            off += s.input_length + 1
+        for s in slots:
+            if s.output_length > 0:
+                in_iocs.append((s.slot, s.subslot, off)); off += 1
+        in_len = max(40, off)
+
+        out_objs = []; out_iocs = []; off = 0
+        for s in slots:
+            if s.output_length > 0:
+                out_objs.append((s.slot, s.subslot, off, s.output_length))
+                off += s.output_length + 1
+            else:
+                out_iocs.append((s.slot, s.subslot, off)); off += 1
+        for s in slots:
+            if s.output_length > 0:
+                out_iocs.append((s.slot, s.subslot, off)); off += 1
+        out_len = max(40, off)
+        return in_objs, in_iocs, in_len, out_objs, out_iocs, out_len
+
+    def _patch_iocr(self):
+        """Replace profinet-py's IOCR block builder so the IOCR matches the real
+        S120 (from the cifX capture): RT_CLASS_2, drive data grouped under API
+        0x3A00 (DAP/PDEV under API 0), and the standard RT frame layout (every
+        sub-module an IODataObject in its providing direction, IOCS in the
+        consuming direction). profinet-py groups everything under API 0 with a
+        different layout, which the S120 rejects (ExpectedSubmodule/IOCR API
+        cross-check). Verified to reproduce the cifX IOCR byte-for-byte."""
         try:
+            import struct as _st
             import profinet.rpc as _r
             if getattr(_r, "_iocr_patched", False):
                 return
+            drive_api = self._envint("PN_DRIVE_API", 0x00003A00)
             rtclass = self._envint("PN_IOCR_RTCLASS", _IOCR_RT_CLASS)
-            if rtclass == 1:
-                return  # RT_CLASS_1 is profinet-py's own default
-            fid_in = self._envint("PN_IOCR_FRAMEID_IN", 0xBBF2)
+            fid_in = self._envint("PN_IOCR_FRAMEID_IN", 0x8000)
             fid_out = self._envint("PN_IOCR_FRAMEID_OUT", 0xFFFF)
-            orig = _r.PNIOCRBlockReqHeader
+            api_of = lambda slot: 0 if slot == 0 else drive_api
 
-            def wrapped(*a, **k):
-                if "iocr_properties" in k:
-                    k["iocr_properties"] = (k["iocr_properties"] & ~0xF) | (rtclass & 0xF)
-                itype = k.get("iocr_type")
-                if itype == 1:       # input CR (device -> controller)
-                    k["frame_id"] = fid_in
-                elif itype == 2:     # output CR (controller -> device)
-                    k["frame_id"] = fid_out
-                return orig(*a, **k)
+            def build(self, iocr_type, iocr_reference, setup):
+                (in_objs, in_iocs, in_len, out_objs, out_iocs,
+                 out_len) = ProfinetCtrl._iocr_layout(setup.slots)
+                if iocr_type == 1:
+                    objs, iocs, dlen, ref, fid = in_objs, in_iocs, in_len, 0x1000, fid_in
+                else:
+                    objs, iocs, dlen, ref, fid = out_objs, out_iocs, out_len, 0x2000, fid_out
+                # group by API, API 0 first
+                grouped = {}
+                for (sl, ss, o, dl) in objs:
+                    grouped.setdefault(api_of(sl), ([], []))[0].append((sl, ss, o))
+                for (sl, ss, o) in iocs:
+                    grouped.setdefault(api_of(sl), ([], []))[1].append((sl, ss, o))
+                apisec = b""
+                for api in sorted(grouped):
+                    od, ic = grouped[api]
+                    apisec += _st.pack(">IH", api, len(od))
+                    for (sl, ss, o) in od:
+                        apisec += _st.pack(">HHH", sl, ss, o)
+                    apisec += _st.pack(">H", len(ic))
+                    for (sl, ss, o) in ic:
+                        apisec += _st.pack(">HHH", sl, ss, o)
+                hdr = _st.pack(">HH", iocr_type, ref)
+                hdr += _st.pack(">H", 0x8892)                 # LT
+                hdr += _st.pack(">I", rtclass & 0xFFFFFFFF)   # IOCRProperties
+                hdr += _st.pack(">HH", dlen, fid)
+                hdr += _st.pack(">HH", setup.send_clock_factor, setup.reduction_ratio)
+                hdr += _st.pack(">HH", 1, 0)                  # phase, sequence
+                hdr += _st.pack(">I", 0xFFFFFFFF)             # frame_send_offset
+                hdr += _st.pack(">HH", setup.watchdog_factor, setup.data_hold_factor)
+                hdr += _st.pack(">H", 0xC000)                 # IOCRTagHeader
+                hdr += b"\x00" * 6                            # multicast MAC
+                hdr += _st.pack(">H", len(grouped))           # NumberOfAPIs
+                body = hdr + apisec
+                return _st.pack(">HHBB", 0x0102, len(body) + 2, 1, 0) + body
 
-            for attr in ("fmt_size", "BLOCK_TYPE"):
-                setattr(wrapped, attr, getattr(orig, attr))
-            _r.PNIOCRBlockReqHeader = wrapped
+            _r.RPCCon._build_iocr_block = build
             _r._iocr_patched = True
-            self._log(f"[PN] IOCR: RT_CLASS_{rtclass}, FrameID in=0x{fid_in:04X} "
-                      f"out=0x{fid_out:04X} (matches Siemens PN Driver)")
+            self._log(f"[PN] IOCR: RT_CLASS_{rtclass}, drive data under API "
+                      f"0x{drive_api:04X}, standard RT frame layout "
+                      f"(matches cifX/real S120)")
         except Exception as e:
-            self._log(f"[PN] WARN: could not adjust IOCR block ({e})")
+            self._log(f"[PN] WARN: could not replace IOCR builder ({e})")
 
     def _patch_alarm_cr(self, conn):
         """Match the AlarmCR block to Siemens' PN Driver (PNIO.dll), which
