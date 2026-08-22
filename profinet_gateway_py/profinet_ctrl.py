@@ -101,6 +101,7 @@ class DeviceState:
     # profinet-py runtime objects
     conn: object = None        # rpc.RPCCon
     cyclic: object = None       # cyclic.CyclicController
+    alarm: object = None        # alarm_listener.AlarmListener
     src_mac: bytes = b""
     slot: int = 1
     subslot: int = 1
@@ -339,6 +340,12 @@ class ProfinetCtrl:
                 conn.close()
                 self._log(f"[PN] Connect failed for {dc.station_name}: no cyclic AR")
                 return False
+
+            # Service the AlarmCR from right after Connect, so any startup alarm
+            # the drive raises is received and ACKed (else it retries, then
+            # aborts the AR with an RTA ERR-PDU).
+            ds.alarm = self._start_alarm_listener(ds, conn, src, s2mac(info.mac))
+
             # 3. Start the cyclic exchange BEFORE PrmEnd/ApplicationReady.
             #    PROFINET expects the controller's RT output frames to already be
             #    on the wire while the AR startup handshake completes. PrmEnd and
@@ -404,6 +411,11 @@ class ProfinetCtrl:
                           "commissioned config (Startdrive/STARTER), and (3) no other "
                           "controller (PLC) already holds a connection to this device.")
             # clean up any half-open resources so a failed reconnect doesn't leak
+            try:
+                if ds.alarm is not None:
+                    ds.alarm.stop()
+            except Exception:
+                pass
             try:
                 if ctrl is not None:
                     ctrl.stop()
@@ -758,6 +770,92 @@ class ProfinetCtrl:
                       "(all IOCS good, matches cifX)")
         except Exception as e:
             self._log(f"[PN] WARN: could not patch cyclic IOCS handling ({e})")
+
+    def _patch_alarm_listener_vlan(self, tci):
+        """Make profinet-py's AlarmListener 802.1Q-aware, exactly as we did for
+        the cyclic path. The S120 sends its alarm frames (FrameID 0xFE01/0xFC01)
+        VLAN-tagged, and the stock listener (a) opens a socket filtered on bare
+        ethertype 0x8892 — which drops 0x8100 frames before Python sees them —
+        and (b) parses the ethertype at offset 12, bailing on 0x8100. So it never
+        receives a tagged alarm and never ACKs it. Patch: open the socket
+        unfiltered, strip the tag on RX, and emit the tag on the ACK TX."""
+        try:
+            import profinet.alarm_listener as _al
+            from profinet.alarm_listener import AlarmListener
+            if getattr(_al, "_vlan_patched", False):
+                return
+            # TX: tag the ACK frames (same trick as the cyclic path).
+            _al._ETHERTYPE_PROFINET_BYTES = (b"\x81\x00"
+                                             + struct.pack(">H", tci) + b"\x88\x92")
+            orig_sock = AlarmListener._create_socket
+            orig_l2 = AlarmListener._handle_layer2_frame
+
+            def sock_all(self, _o=orig_sock):
+                # Layer-2: open unfiltered so tagged alarms are delivered; keep
+                # the stock UDP path untouched.
+                if self.endpoint.transport == 0:
+                    from profinet.util import ethernet_socket
+                    s = ethernet_socket(self.endpoint.interface, None)
+                    s.settimeout(1.0)
+                    return s
+                return _o(self)
+
+            def l2_untag(self, _o=orig_l2):
+                data = self._sock.recv(4096)
+                if len(data) >= 18 and data[12] == 0x81 and data[13] == 0x00:
+                    data = data[:12] + data[16:]          # strip the 4-byte tag
+                if len(data) < 16:
+                    return
+                from profinet.alarm_listener import (EthernetAlarmHeaderStruct,
+                    ETHERTYPE_PROFINET, FRAME_ID_ALARM_HIGH, FRAME_ID_ALARM_LOW)
+                eth = EthernetAlarmHeaderStruct.parse(data[:16])
+                if eth.ethertype != ETHERTYPE_PROFINET:
+                    return
+                if eth.src_mac != self.endpoint.device_mac:
+                    return
+                if eth.frame_id == FRAME_ID_ALARM_HIGH:
+                    self._process_alarm(data[16:], True, src_mac=eth.src_mac)
+                elif eth.frame_id == FRAME_ID_ALARM_LOW:
+                    self._process_alarm(data[16:], False, src_mac=eth.src_mac)
+
+            AlarmListener._create_socket = sock_all
+            AlarmListener._handle_layer2_frame = l2_untag
+            _al._vlan_patched = True
+        except Exception as e:
+            self._log(f"[PN] WARN: could not make AlarmListener VLAN-aware ({e})")
+
+    def _start_alarm_listener(self, ds, conn, src, drive_mac):
+        """Service the AlarmCR we establish in the Connect. We set up the alarm
+        channel but profinet-py never listens on it, so any alarm the S120 sends
+        (e.g. a startup diagnosis for the pending 'EPOS enable not possible'
+        state) goes un-ACKed; after RTARetries the drive sends an RTA ERR-PDU
+        (FrameID 0xFE01) and tears the AR down ('cyclic connection interrupted').
+        Start a background listener that receives and ACKs alarms. Off with
+        PN_ALARM_LISTENER=0."""
+        if not self._envint("PN_ALARM_LISTENER", 1):
+            self._log("[PN] Alarm listener disabled (PN_ALARM_LISTENER=0)")
+            return None
+        try:
+            from profinet.alarm_listener import AlarmListener, AlarmEndpoint
+            tci = self._envint("PN_CYCLIC_VLAN_TCI", _CYCLIC_VLAN_TCI)
+            if self._envint("PN_CYCLIC_VLAN", self._cyclic_profile()["vlan"]):
+                self._patch_alarm_listener_vlan(tci)
+            ctrl_ref = getattr(conn, "_alarm_ref", 0)
+            dev_ref = getattr(conn, "_device_alarm_ref", 0)
+            ep = AlarmEndpoint(interface=self._adapter, controller_ref=ctrl_ref,
+                               device_ref=dev_ref, device_mac=drive_mac,
+                               transport=0)
+            al = AlarmListener(ep, controller_mac=src)
+            al.add_callback(lambda a: self._log(
+                f"[PN] ALARM from drive: {getattr(a, 'alarm_type_name', a)} "
+                f"@ {getattr(a, 'location', '?')} — ACKed"))
+            al.start()
+            self._log(f"[PN] Alarm listener started (ctrl_ref={ctrl_ref} "
+                      f"dev_ref={dev_ref}) — servicing the AlarmCR")
+            return al
+        except Exception as e:
+            self._log(f"[PN] WARN: could not start alarm listener ({e})")
+            return None
 
     def _patch_iocr(self):
         """Replace profinet-py's IOCR block builder so the IOCR matches the real
@@ -1308,6 +1406,11 @@ class ProfinetCtrl:
             devices = list(self._devices)
             self._devices = []
         for ds in devices:
+            try:
+                if ds.alarm is not None:
+                    ds.alarm.stop()
+            except Exception:
+                pass
             try:
                 if ds.cyclic is not None:
                     ds.cyclic.stop()
